@@ -16,6 +16,7 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
         nirsdatanum
         nirs_tb
         stim0
+        hFig
     end
     
     methods
@@ -69,6 +70,8 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
             %           measurementList: [1x8 MeasListClass]
             %
             
+            obj = obj@AcqDataClass(varargin);
+            
             % Initialize properties from SNIRF spec
             obj.Initialize()
             
@@ -76,6 +79,8 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
             obj.SetFileFormat('hdf5');
             obj.location = '/nirs';
             obj.nirsdatanum = 1;
+            obj.hFig = [-1; -1];
+
             
             %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
             % Between 1 and 4 arguments covers the following syntax variants
@@ -86,6 +91,7 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
             % obj = SnirfClass(filename, dataStorageScheme);
             % obj = SnirfClass(dotnirs);
             % obj = SnirfClass(dotnirs, numdatabllocks);
+            % obj = SnirfClass(SD);
             % obj = SnirfClass(data, stim);
             % obj = SnirfClass(data, stim, probe);
             % obj = SnirfClass(data, stim, probe, aux);
@@ -132,7 +138,7 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
                 % obj = SnirfClass(dotnirs);
                 % obj = SnirfClass(dotnirs, numdatabllocks);
                 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-                elseif isstruct(varargin{1}) || isa(varargin{1}, 'NirsClass')
+                elseif NirsClass(varargin{1}).IsValid()
                     
                     % obj = SnirfClass(dotnirs);
                     tfactors = 1;    % Debug simulation parameter
@@ -141,37 +147,46 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
                     if nargin==2
                         tfactors = varargin{2};
                     end
-                    dotnirs = varargin{1};
+                    dotnirs = NirsClass(varargin{1});
                     obj.GenSimulatedTimeBases(dotnirs, tfactors);
                     
                     % Required fields
-                    for ii=1:length(tfactors)
+                    for ii = 1:length(tfactors)
                         obj.data(ii) = DataClass(obj.nirs_tb(ii).d, obj.nirs_tb(ii).t(:), obj.nirs_tb(ii).SD.MeasList);
                     end
-                    obj.probe      = ProbeClass(dotnirs.SD);
-                    
+                    obj.probe       = ProbeClass(dotnirs.SD);                    
+                    obj.metaDataTags.SetLengthUnit(dotnirs.SD.SpatialUnit);
                     
                     % Optional fields
-                    if isfield(dotnirs,'s')
-                        for ii=1:size(dotnirs.s,2)
-                            if isfield(dotnirs, 'CondNames')
+                    if isproperty(dotnirs,'s')
+                        for ii = 1:size(dotnirs.s,2)
+                            if isproperty(dotnirs, 'CondNames')
                                 obj.stim(ii) = StimClass(dotnirs.s(:,ii), dotnirs.t(:), dotnirs.CondNames{ii});
                             else
                                 obj.stim(ii) = StimClass(dotnirs.s(:,ii), dotnirs.t(:), num2str(ii));
                             end
                         end
                     end
-                    if isfield(dotnirs,'aux')
-                        for ii=1:size(dotnirs.aux,2)
+                    if isproperty(dotnirs,'aux')
+                        for ii = 1:size(dotnirs.aux,2)
                             obj.aux(ii) = AuxClass(dotnirs.aux(:,ii), dotnirs.t(:), sprintf('aux%d',ii));
                         end
                     end
                     
                     % Add required field metadatatags that has no .nirs
                     % equivalent 
-                    obj.metaDataTags   = MetaDataTagsClass();
-
+                    obj.metaDataTags   = MetaDataTagsClass('', dotnirs.SD.SpatialUnit);
                     
+                %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+                % obj = SnirfClass(SD);
+                %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+                elseif NirsClass(varargin{1}).IsProbeValid()
+                    
+                    n = NirsClass(varargin{1});
+                    obj.probe = ProbeClass(n.SD);
+                    obj.data = DataClass(n.SD);                    
+                    obj.metaDataTags   = MetaDataTagsClass('', n.SD.SpatialUnit);
+                                        
                 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
                 % obj = SnirfClass(data, stim);
                 % obj = SnirfClass(data, stim, probe);
@@ -221,7 +236,7 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
                 end
                 
                 obj.data(1) = DataClass(d, t(:), SD.MeasList);
-                for ii=1:size(s,2)
+                for ii = 1:size(s,2)
                     if nargin==5
                         condition = num2str(ii);
                     else
@@ -230,7 +245,7 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
                     obj.stim(ii) = StimClass(s(:,ii), t(:), condition);
                 end
                 obj.probe      = ProbeClass(SD);
-                for ii=1:size(aux,2)
+                for ii = 1:size(aux,2)
                     obj.aux(ii) = AuxClass(aux, t(:), sprintf('aux%d',ii));
                 end
                 
@@ -259,11 +274,12 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
             obj.errmsgs = {
                 'MATLAB could not load the file.'
                 '''formatVersion'' is invalid.'
-                '''metaDataTags'' is invalid.'
-                '''data'' is invalid.'
-                '''stim'' is invalid and could not be loaded'
-                '''probe'' is invalid.'
-                '''aux'' is invalid and could not be loaded'
+                '''metaDataTags'' field is invalid.'
+                '''data'' field is invalid.'
+                '''stim'' field has corrupt data. Some or all stims could not be loaded'
+                '''probe'' field is invalid.'
+                '''aux'' field is invalid and could not be loaded'
+                'WARNING: ''data'' field corrupt and unusable'
                 };
         end
         
@@ -294,6 +310,7 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
             if ~isempty(obj2.GetFilename()) && isempty(obj.GetFilename())
                 obj.SetFilename(obj2.GetFilename());
             end
+            obj.SetDataStorageScheme(obj2.GetDataStorageScheme());
         end
         
         
@@ -316,11 +333,19 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
             
             % Copy mutable properties to new object instance;
             objnew.stim = CopyHandles(obj.stim);
-            
-            if strcmp(options, 'extended')
-                t = obj.GetTimeCombined();
-                objnew.data = DataClass([],t,[]);
+            objnew.SortStims();
+            objnew.SetDataStorageScheme(obj.GetDataStorageScheme());            
+        end
+        
+        
+        
+        % -------------------------------------------------------
+        function ReloadStim(obj, obj2)            
+            if strcmpi(obj2.GetDataStorageScheme(), 'files')
+                obj2.LoadStim(obj2.GetFilename());
             end
+            obj.stim = CopyHandles(obj2.stim);
+            obj.SortStims();
         end
         
         
@@ -388,6 +413,17 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
         
         
         % -------------------------------------------------------
+        function err = LoadTime(obj)
+            err = 0;
+            if isempty(obj.data)
+                obj.data = DataClass();
+                err = obj.data.LoadTime(obj.GetFilename(), [obj.location, '/data1']);
+            end
+        end
+        
+        
+        
+        % -------------------------------------------------------
         function err = LoadData(obj, fileobj)
             err = 0;
             ii=1;
@@ -395,22 +431,41 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
                 if ii > length(obj.data)
                     obj.data(ii) = DataClass;
                 end
-                if obj.data(ii).LoadHdf5(fileobj, [obj.location, '/data', num2str(ii)]) < 0
+                
+                err = obj.data(ii).LoadHdf5(fileobj, [obj.location, '/data', num2str(ii)]);
+                if err < 0
                     obj.data(ii).delete();
                     obj.data(ii) = [];
-                    if ii==1
-                        err = -1;
+                    if err == -1
+                        err = 0;
                     end
                     break;
+                elseif err > 0
+                    break
                 end
                 ii=ii+1;
             end
+            
+            % This is a required field. If it's empty means the whole snirf object is bad
+            if isempty(obj.data)
+                err = -1;
+            end
         end
+        
         
         
         % -------------------------------------------------------
         function err = LoadStim(obj, fileobj)
             err = 0;
+            
+            if obj.LoadStimOverride(obj.GetFilename())
+%                 if obj.GetError()<0
+%                     err = -1;
+%                 end
+                return
+            end
+            
+            obj.stim  = StimClass().empty();
             
             ii=1;
             while 1
@@ -422,10 +477,21 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
                     obj.stim(ii).delete();
                     obj.stim(ii) = [];
                     break;
+                else
+                    for kk = 1:ii-1
+                        if strcmp(obj.stim(kk).name, obj.stim(ii).name)
+                            obj.stim(ii).delete();
+                            obj.stim(ii) = [];
+                            err = err-6;
+                            break
+                        end
+                    end
+                    if err ~= 0
+                        break;
+                    end
                 end
                 ii=ii+1;
             end
-            obj.SortStims();
             
             % Load original, unedited stims, if they exist
             ii=1;
@@ -447,8 +513,20 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
         
         % -------------------------------------------------------
         function err = LoadProbe(obj, fileobj, ~)
+            % metaDataTags is a prerequisite for load probe, so check to make sure its already been loaded
+            if isempty(obj.metaDataTags)
+                obj.LoadMetaDataTags(fileobj);
+            end
+                
+            % get lenth unit through class method
+            LengthUnit = obj.metaDataTags.Get('LengthUnit');
             obj.probe = ProbeClass();
-            err = obj.probe.LoadHdf5(fileobj, [obj.location, '/probe']);
+            err = obj.probe.LoadHdf5(fileobj, [obj.location, '/probe'], LengthUnit);
+            
+            % This is a required field. If it's empty means the whole snirf object is bad
+            if isempty(obj.probe)
+                err = -1;
+            end
         end
         
         
@@ -495,6 +573,7 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
             
             % Don't reload if not empty
             if ~obj.IsEmpty()
+                obj.LoadStim(fileobj);
                 err = obj.GetError();     % preserve error state if exiting early
                 return;
             end
@@ -532,8 +611,13 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
                 end
 
                 %%%% Load data
-                if obj.LoadData(obj.fid) < 0 && err >= 0
+                errtmp = obj.LoadData(obj.fid);
+                if errtmp < 0 && err >= 0
                     err = -4;
+                elseif errtmp == 5 && err >= 0
+                	err = 8;
+                elseif errtmp > 0 && err >= 0
+                    err = 4;
                 end
 
                 %%%% Load stim
@@ -575,14 +659,16 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
         
         % -------------------------------------------------------
         function SaveMetaDataTags(obj, fileobj)
-            obj.metaDataTags.SaveHdf5(fileobj, [obj.location, '/metaDataTags']);
+            if ~isempty(obj.metaDataTags)
+                obj.metaDataTags.SaveHdf5(fileobj, [obj.location, '/metaDataTags']);
+            end
         end
         
         
         
         % -------------------------------------------------------
         function SaveData(obj, fileobj)
-            for ii=1:length(obj.data)
+            for ii = 1:length(obj.data)
                 obj.data(ii).SaveHdf5(fileobj, [obj.location, '/data', num2str(ii)]);
             end
         end
@@ -590,12 +676,12 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
         
         % -------------------------------------------------------
         function SaveStim(obj, fileobj)
-            for ii=1:length(obj.stim)
+            for ii = 1:length(obj.stim)
                 obj.stim(ii).SaveHdf5(fileobj, [obj.location, '/stim', num2str(ii)]);
             end
             if isempty(obj.stim0)
                 obj.stim0 = obj.stim.copy();
-                for ii=1:length(obj.stim0)
+                for ii = 1:length(obj.stim0)
                     obj.stim0(ii).SaveHdf5(fileobj, [obj.location, '/stim0', num2str(ii)]);
                 end
             end
@@ -604,20 +690,25 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
         
         % -------------------------------------------------------
         function SaveProbe(obj, fileobj)
-            obj.probe.SaveHdf5(fileobj, [obj.location, '/probe']);
-        end
-        
-        
-        % -------------------------------------------------------
-        function SaveAux(obj, fileobj)
-            for ii=1:length(obj.aux)
-                obj.aux(ii).SaveHdf5(fileobj, [obj.location, '/aux', num2str(ii)]);
+            if ~isempty(obj.probe)
+                obj.probe.SaveHdf5(fileobj, [obj.location, '/probe']);
             end
         end
         
         
         % -------------------------------------------------------
-        function SaveHdf5(obj, fileobj, ~)
+        function SaveAux(obj, fileobj)
+            for ii = 1:length(obj.aux)
+                obj.aux(ii).SaveHdf5(fileobj, [obj.location, '/aux', num2str(ii)]);
+            end
+        end
+        
+        
+        
+        % -------------------------------------------------------
+        function err = SaveHdf5(obj, fileobj, ~)
+            err = 0;
+            
             % Arg 1
             if ~exist('fileobj','var') || isempty(fileobj)
                 error('Unable to save file. No file name given.')
@@ -627,31 +718,49 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
             if exist(fileobj, 'file')
                 delete(fileobj);
             end
-            obj.fid = H5F.create(fileobj, 'H5F_ACC_TRUNC', 'H5P_DEFAULT', 'H5P_DEFAULT');
-            H5F.close(obj.fid);
+
+            % Convert file object to HDF5 file descriptor
+            obj.fid = HDF5_GetFileDescriptor(fileobj);
+            if obj.fid < 0
+                err = -1;
+                return;
+            end
             
             %%%%% Save this object's properties
-            
-            % Save formatVersion
-            if isempty(obj.formatVersion)
-                obj.formatVersion = '1.1';
+            try
+                
+                % Save formatVersion
+                if isempty(obj.formatVersion)
+                    obj.formatVersion = '1.1';
+                end
+                hdf5write_safe(obj.fid, '/formatVersion', obj.formatVersion);
+                
+                % Save metaDataTags
+                obj.SaveMetaDataTags(obj.fid);
+                
+                % Save data
+                obj.SaveData(obj.fid);
+                
+                % Save stim
+                obj.SaveStim(obj.fid);
+                
+                % Save sd
+                obj.SaveProbe(obj.fid);
+                
+                % Save aux
+                obj.SaveAux(obj.fid);
+                
+            catch ME
+                
+                H5F.close(obj.fid);
+                if ispathvalid(fileobj)
+                    delete(fileobj);
+                end
+                rethrow(ME)
+                
             end
-            hdf5write_safe(fileobj, '/formatVersion', obj.formatVersion);
             
-            % Save metaDataTags
-            obj.SaveMetaDataTags(fileobj);
-            
-            % Save data
-            obj.SaveData(fileobj);
-            
-            % Save stim
-            obj.SaveStim(fileobj);
-            
-            % Save sd
-            obj.SaveProbe(fileobj);
-            
-            % Save aux
-            obj.SaveAux(fileobj);
+            H5F.close(obj.fid);
         end
         
         
@@ -661,8 +770,7 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
             flags = zeros(length(obj.stim), 1);
             
             % Load stim from file and update it
-            snirfFile = SnirfClass();
-            snirfFile.LoadStim(fileobj);
+            snirfFile = SnirfClass(fileobj);
             
             % Update stims from file with edited stims
             for ii = 1:length(obj.stim)
@@ -687,7 +795,7 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
             % If stims were edited then update snirf file with new stims
             changes = sum(flags);
             if changes > 0
-                snirfFile.SaveStim(fileobj);
+                snirfFile.Save();
             end
             stimFromFile = snirfFile.stim;
         end
@@ -696,47 +804,20 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
         
         % -------------------------------------------------------
         function CopyStim(obj, obj2)
+            obj.stim = StimClass.empty();
             for ii = 1:length(obj2.stim)
-                if ii > length(obj.stim)
-                    obj.stim(ii) = StimClass(obj2.stim(ii));
-                else
-                    obj.stim(ii).Copy(obj2.stim(ii));
-                end
+                obj.stim(ii) = StimClass(obj2.stim(ii));
             end
         end        
         
         
         % -------------------------------------------------------
-        function changes = StimChangesMade(obj)
-            
-            flags = zeros(length(obj.stim), 1);
-            
+        function changes = StimChangesMade(obj)                        
             % Load stims from file
             snirf = SnirfClass();
-            snirf.LoadStim(obj.GetFilename);
-            stimFromFile = snirf.stim;
-            
-            % Update stims from file with edited stims
-            for ii = 1:length(obj.stim)
-                for jj = 1:length(stimFromFile)
-                    if strcmp(obj.stim(ii).GetName(), stimFromFile(jj).GetName())
-                        if obj.stim(ii) ~= stimFromFile(jj)
-                            flags(ii) = 1;
-                        else
-                            flags(ii) = -1;
-                        end
-                        break;
-                    end
-                end
-                if flags(ii)==0
-                    % We have new stimulus condition added
-                    if ~obj.stim(ii).IsEmpty()
-                        flags(ii) = 1;
-                    end
-                end
-            end
-            flags(flags ~= 1) = 0;
-            changes = sum(flags)>0;
+            snirf.SetFilename(obj.GetFilename())
+            snirf.LoadStim(obj.GetFilename());
+            changes = ~obj.EqualStim(snirf);
         end
         
         
@@ -783,21 +864,102 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
             if ~strcmp(obj.formatVersion, obj2.formatVersion)
                 return;
             end
-            if length(obj.data)~=length(obj2.data)
+            if ~obj.EqualData(obj2)
                 return;
             end
-            for ii=1:length(obj.data)
-                if obj.data(ii)~=obj2.data(ii)
+            if ~obj.EqualStim(obj2)
+                return;
+            end
+            if obj.probe ~= obj2.probe
+                return;
+            end
+            if ~obj.EqualAux(obj2)
+                return;
+            end
+            B = true;
+        end
+        
+        
+        
+        % --------------------------------------------------------------------
+        function b = EqualMetaDataTags(obj, obj2)
+            b = false;
+            if length(obj.metaDataTags) ~= length(obj2.metaDataTags)
+                return;
+            end
+            for ii = 1:length(obj.metaDataTags)
+                if obj.metaDataTags(ii) ~= obj2.metaDataTags(ii)
                     return;
                 end
             end
-            if length(obj.stim)~=length(obj2.stim)
+            b = true;
+        end
+        
+        
+        
+        % --------------------------------------------------------------------
+        function b = EqualData(obj, obj2)
+            b = false;
+            if length(obj.data) ~= length(obj2.data)
                 return;
             end
-            for ii=1:length(obj.stim)
+            for ii = 1:length(obj.data)
+                if obj.data(ii) ~= obj2.data(ii)
+                    return;
+                end
+            end
+            b = true;
+        end
+        
+        
+        
+        % --------------------------------------------------------------------
+        function b = EqualStim(obj, obj2)
+            b = false;
+            for ii = 1:length(obj.stim)
                 flag = false;
-                for jj=1:length(obj2.stim)
-                    if obj.stim(ii)==obj2.stim(jj)
+                for jj = 1:length(obj2.stim)
+                    if obj.stim(ii) == obj2.stim(jj)
+                        flag = true;
+                        break;
+                    end
+                end
+                if flag==false
+                    % If obj condition was NOT found in obj2 BUT it is empty (no data), then we don't 
+                    % count that as a unequal criteria, that is, obj and obj2 are still considered equal
+                    if ~obj.stim(ii).IsEmpty()
+                        return;
+                    end
+                end
+            end
+            for ii = 1:length(obj2.stim)
+                flag = false;
+                for jj = 1:length(obj.stim)
+                    if obj2.stim(ii) == obj.stim(jj)
+                        flag = true;
+                        break;
+                    end
+                end
+                if flag==false
+                    % If obj2 condition was NOT found in obj BUT it is empty (no data), then we don't 
+                    % count that as a unequal criteria, that is, obj and obj2 are still considered equal
+                    if ~obj2.stim(ii).IsEmpty()
+                        return;
+                    end
+                end
+            end
+            b = true;
+        end
+        
+        
+        
+        % --------------------------------------------------------------------
+        function b = EqualAux(obj, obj2)
+            b = false;
+            for ii = 1:length(obj.aux)
+                flag = false;
+                for jj = 1:length(obj2.aux)
+                    if obj.aux(ii) == obj2.aux(jj)
                         flag = true;
                         break;
                     end
@@ -806,27 +968,21 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
                     return;
                 end
             end
-            if obj.probe~=obj2.probe
-                return;
-            end
-            if length(obj.aux)~=length(obj2.aux)
-                return;
-            end
-            for ii=1:length(obj.aux)
-                if obj.aux(ii)~=obj2.aux(ii)
+            for ii = 1:length(obj2.aux)
+                flag = false;
+                for jj = 1:length(obj.aux)
+                    if obj2.aux(ii) == obj.aux(jj)
+                        flag = true;
+                        break;
+                    end
+                end
+                if flag==false
                     return;
                 end
             end
-            if length(obj.metaDataTags)~=length(obj2.metaDataTags)
-                return;
-            end
-            for ii=1:length(obj.metaDataTags)
-                if obj.metaDataTags(ii)~=obj2.metaDataTags(ii)
-                    return;
-                end
-            end
-            B = true;
+            b = true;
         end
+        
         
     end
     
@@ -852,8 +1008,17 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
         end
         
         % ---------------------------------------------------------
-        function val = GetData(obj)
-            val = obj.data;
+        function [val, t] = GetData(obj, iBlk)
+            val = [];
+            t = [];
+            if ~exist('iBlk','var') || isempty(iBlk)
+                iBlk = 1;
+            end
+            if isempty(obj) || isempty(obj.data)
+                return;
+            end
+            val = obj.data(iBlk);
+            t = obj.data(iBlk).time;
         end
         
         % ---------------------------------------------------------
@@ -912,9 +1077,14 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
             if isempty(obj.metaDataTags)
                 return;
             end
-            tag = obj.metaDataTags.Get('LengthUnit');
-            val = tag.value;
+            val = obj.metaDataTags.Get('LengthUnit');
         end
+        
+        
+        % ---------------------------------------------------------
+        function bbox = GetSdgBbox(obj)
+            bbox = obj.probe.GetSdgBbox();
+        end                
         
     end
     
@@ -938,8 +1108,35 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
         
         
         % ---------------------------------------------------------
-        function datamat = GetDataTimeSeries(obj, options, iBlk)
-            datamat = [];
+        function ml = GetMeasurementList(obj, matrixMode, iBlk)
+            ml = [];
+            if ~exist('matrixMode','var')
+                matrixMode = '';
+            end
+            if ~exist('iBlk','var') || isempty(iBlk)
+                iBlk = 1;
+            end
+            freememory = false;
+            if isempty(obj.data)
+                obj.LoadData(obj.GetFilename());
+                freememory = true;
+            end
+            if iBlk>length(obj.data)
+                return;
+            end
+            ml = obj.data(iBlk).GetMeasurementList(matrixMode);
+            if freememory 
+                obj.FreeMemory(obj.GetFilename());
+            end
+        end
+        
+        
+        
+        % ---------------------------------------------------------
+        function [d, t, ml] = GetDataTimeSeries(obj, options, iBlk)
+            d = [];
+            t = [];
+            ml = [];
             if ~exist('options','var')
                 options = '';
             end
@@ -949,20 +1146,42 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
             if iBlk>length(obj.data)
                 return;
             end
-            datamat = obj.data(iBlk).GetDataTimeSeries(options);
+            [d, t, ml] = obj.data(iBlk).GetDataTimeSeries(options);
         end
+        
         
         
         % ---------------------------------------------------------
-        function datamat = GetAuxDataMatrix(obj)
+        function [datamat, p, Nmin] = GetAuxDataMatrix(obj, obj2)            
             datamat = [];
+            p = 0;
+            Nmin = 0;
+            
             if isempty(obj.aux)
                 return;
             end
-            for ii=1:length(obj.aux)
-                datamat(:,ii) = obj.aux(ii).GetDataTimeSeries();
+            if ~exist('obj2','var')
+                obj2 = obj.data(1);            
+            end
+            
+            datamat = zeros(size(obj2.dataTimeSeries,1), length(obj.aux));
+            
+            % Get all aux channels to be on the same time base with obj2 which by default is the data
+            for ii = 1:length(obj.aux)
+                if length(obj2.GetTime()) < length(obj.aux(ii).GetTime())   % dessimate
+                    p = length(obj2.GetTime());
+                    q = length(obj.aux(ii).GetTime());
+                elseif length(obj2.GetTime()) > length(obj.aux(ii).GetTime())  % interpolate
+                    p = length(obj.aux(ii).GetTime());
+                    q = length(obj2.GetTime());
+                else
+                    p = length(obj2.GetTime());
+                    q = length(obj.aux(ii).GetTime());
+                end
+                datamat(:,ii) = resample(obj.aux(ii).GetDataTimeSeries(), p, q);
             end
         end
+        
         
         
         % ---------------------------------------------------------
@@ -1077,7 +1296,11 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
             if nargin==1
                 return;
             end
-            CondNamesLocal = unique({obj.stim.name});
+            
+            % Bug fix: unique with no arguments changes the order by
+            % sorting. Here order should be preserved or else we have problems. 
+            % Add the 'stable' argument to preseerve order. JD, Nov 1, 2022
+            CondNamesLocal = unique({obj.stim.name}, 'stable');
             stimnew = StimClass().empty;
             for ii=1:length(CondNames)
                 k = find(strcmp(CondNamesLocal, CondNames{ii}));
@@ -1099,6 +1322,12 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
             end
         end
         
+        
+        % ---------------------------------------------------------
+        function probe = GetProbe(obj)
+            obj.LoadProbe(obj.GetFilename());
+            probe = obj.probe;
+        end
         
         
         % ---------------------------------------------------------
@@ -1122,22 +1351,20 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
         
         
         % ---------------------------------------------------------
-        function srcpos = GetSrcPos(obj,option)
-            if exist('option','var')
-                srcpos = obj.probe.GetSrcPos(option);
-            else
-                srcpos = obj.probe.GetSrcPos();
+        function srcpos = GetSrcPos(obj, options)
+            if exist(options,'var')
+                options = '';
             end
+            srcpos = obj.probe.GetSrcPos(options);
         end
         
         
         % ---------------------------------------------------------
-        function detpos = GetDetPos(obj,option)
-            if exist('option','var')
-                detpos = obj.probe.GetDetPos(option);
-            else
-                detpos = obj.probe.GetDetPos();
+        function detpos = GetDetPos(obj, options)
+            if exist(options,'var')
+                options = '';
             end
+            detpos = obj.probe.GetDetPos(options);
         end
         
         
@@ -1187,6 +1414,15 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
             iDataBlks = sort(unique(iDataBlks(:)'));
             
         end
+        
+        
+        % ---------------------------------------------------------
+        function unit = GetSpatialUnit(obj)
+            unit = obj.metaDataTags.Get('LengthUnits');
+        end
+        
+        
+        
         
     end
     
@@ -1295,7 +1531,7 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
         
         
         % ----------------------------------------------------------------------------------
-        function DeleteStims(obj, tPts, condition)
+        function DeleteStims(obj, tPts, ~)
             % Find all stims for any conditions which match the time points.
             for ii=1:length(obj.stim)
                 obj.stim(ii).DeleteStims(tPts);
@@ -1304,7 +1540,7 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
         
         
         % ----------------------------------------------------------------------------------
-        function ToggleStims(obj, tPts, condition)
+        function ToggleStims(obj, tPts, ~)
             % Find all stims for any conditions which match the time points.
             for ii=1:length(obj.stim)
                 obj.stim(ii).ToggleStims(tPts);
@@ -1592,6 +1828,331 @@ classdef SnirfClass < AcqDataClass & FileLoadSaveClass
             
         end
         
+        
+        
+        % -----------------------------------------------------------------------
+        function [md2d, md3d] = GetChannelsMeanDistance(obj)
+            ml = obj.data(1).GetMeasListSrcDetPairs();
+            d1 = zeros(size(ml,1),1);
+            for ii = 1:length(d1)
+                d1(ii) = dist3(obj.probe.sourcePos2D(ml(ii,1),:), obj.probe.detectorPos2D(ml(ii,2),:)); 
+                d2(ii) = dist3(obj.probe.sourcePos3D(ml(ii,1),:), obj.probe.detectorPos3D(ml(ii,2),:)); 
+            end
+            md2d = mean(d1);
+            md3d = mean(d2);
+        end
+        
+        
+        
+        % -----------------------------------------------------------------------
+        function err = ErrorCheckSpatialUnits(obj)
+            err = 0;
+            msg = [];
+            [md2d, md3d] = obj.GetChannelsMeanDistance();
+            LengthUnitDeclared = obj.metaDataTags.GetLengthUnit();            
+            magnitudeMm = log10(30);
+            magnitudeCm = log10(3);
+            magnitudeM  = log10(.03);
+            
+            % 2D coordinates
+            diffMm = abs(magnitudeMm - log10(md2d));
+            diffCm = abs(magnitudeCm - log10(md2d));
+            diffM = abs(magnitudeM - log10(md2d));
+            [~, idx] =  min([diffMm, diffCm, diffM]);
+            if idx == 1
+                LengthUnitActual2D = 'mm';
+            elseif idx == 2
+                LengthUnitActual2D = 'cm';
+            elseif idx == 3
+                LengthUnitActual2D = 'm';
+            end
+            if ~strcmpi(LengthUnitDeclared, LengthUnitActual2D)
+                msg{1} = sprintf('WARNING: Declared LengthUnit (%s) might not match the likely actual units (%s) of the 2D coordinates\n', ...
+                    LengthUnitDeclared, LengthUnitActual2D);
+            end
+            
+            % 2D coordinates
+            diffMm = abs(magnitudeMm - log10(md3d));
+            diffCm = abs(magnitudeCm - log10(md3d));
+            diffM = abs(magnitudeM - log10(md3d));
+            [~, idx] =  min([diffMm, diffCm, diffM]);
+            if idx == 1
+                LengthUnitActual3D = 'mm';
+            elseif idx == 2
+                LengthUnitActual3D = 'cm';
+            elseif idx == 3
+                LengthUnitActual3D = 'm';
+            end
+            if ~strcmpi(LengthUnitDeclared, LengthUnitActual3D)
+                msg{2} = sprintf('WARNING: Declared LengthUnit (%s) might not match the likely actual units (%s) of the 3D coordinates\n\n', ...
+                    LengthUnitDeclared, LengthUnitActual3D);
+            end
+            
+            % Compare 2D units with 3D units
+            if ~strcmpi(LengthUnitActual2D, LengthUnitActual3D)
+                msg{3} = sprintf('WARNING: The likely actual units of the 2D coordinates (%s) might not match the like actual units of the 3D coordinates (%s)\n\n', ...
+                    LengthUnitActual3D, LengthUnitActual3D);
+            end
+            
+            if ~isempty(msg)
+                MenuBox(msg);
+            end
+        end
+
+
+
+        % ----------------------------------------------------------------------------------
+        function hAxes = GenerateStandaloneAxes(obj, datatype, iChs)
+            k = find(obj.hFig(1,:)==-1);
+            obj.hFig(1,k(1)) = figure;
+            hAxes = gca;
+            plotname = sprintf('"%s";   %s data ;   channels idxs: [%s]', obj.GetFilename(),  datatype, num2str(iChs'));
+            namesize = uint32(length(plotname)/3);
+            set(obj.hFig(1,k(1)), 'units','characters');
+            p1 = get(obj.hFig(1,k(1)), 'position');
+            set(obj.hFig(1,k(1)), 'name',plotname, 'menubar','none', 'NumberTitle','off', 'position',[p1(1)/2, p1(2), p1(3)+namesize, p1(4)]);
+            obj.hFig(:,k(1)+1) = -1;
+        end
+           
+        
+            
+        % ----------------------------------------------------------------------------------
+        function Plot(obj, sdPairs, iBlk)
+            %
+            % SYNTAX:
+            %   TreeNodeClass.Plot(iChs, iBlk)
+            % 
+            %
+            % DESCRIPTION:
+            %   Plot data from channels specified by 2d array where each row spoecifying a single channel
+            %   contains indices [source, detector, condition, wavelength]. In addtion to the data, this method 
+            %   plots any existing stims, and the probe associated with the SNIRF object from which the data 
+            %   was taken. NOTE: the args iBlk and hAxes can be ommitted and will default to 1 and current 
+            %   axes respectively.
+            %
+            %
+            % INPUT:
+            %   sdPairs - 2d array of channel indices where each row represents a channel consisting of the indices
+            %             [source, detector, condition, datatype]
+            %
+            %   iBlk - Optional argument (defaults = 1). In theory SNIRF data field is an array of data blocks. This argunment selects the 
+            %          data block from which the plot data is taken.
+            %   
+            %   hAxes - Optional argument (default is current axes or gca()), specifying the axes handle of the axes in which to plot the data.
+            %
+            %
+            
+            % Parse input args
+            if ~exist('sdPairs','var')
+                sdPairs = [1,1,0,1];
+            end
+            if ~exist('iBlk','var') || isempty(iBlk)
+                iBlk = 1;
+            end
+
+            
+            % Convert channels in the form of a list of sd pairs to a column vector of indices into the measurement list
+            iChs = obj.SdPairIdxs2vectorIdxs(sdPairs, iBlk);
+            
+            
+            % Extract SNIRF parameters for plotting:  probe, data, time, measuremntList and stim
+            d = obj.data(1).dataTimeSeries;
+            t = obj.data(1).time;
+            ml = obj.data(1).GetMeasurementList('matrix');
+            
+            % If there's no data to plot then exit
+            if isempty(d)
+                fprintf('No data to plot\n');
+                return;
+            end
+            
+            
+            % Set up standalone figure with axes for plotting data, if axes handle was not passed down from caller 
+            % in the last arg. There will be a separate figure displaying the probe associated with this data plot. 
+            % a few lines down in DisplayProbe.
+            hAxes = obj.GenerateStandaloneAxes('HRF', iChs);            
+                        
+            % Plot data
+            hold on
+            chSelect = [];
+            for ii = 1:length(iChs)
+                hdata(ii) = plot(hAxes, t, d(:,iChs(ii)), 'linewidth',2);
+                chSelect(ii,:) = [ml(iChs(ii),1), ml(iChs(ii),2), ml(iChs(ii),3), ml(iChs(ii),4), get(hdata(ii), 'color')]; 
+            end
+            set(hAxes, 'xlim', [t(1), t(end)]);                        
+            
+            % Display probe in separate figure
+            if isempty(chSelect)
+                fprintf('ERROR: no valid channels were selelcted\n');
+                obj.DisplayProbe();
+            else
+                obj.DisplayProbe(chSelect(:,1:2), chSelect(:,5:7));
+            end
+            
+            
+            % Wrap up before exiting
+            drawnow;
+            pause(.1);
+            hold off
+        end
+        
+        
+        % ----------------------------------------------------------------------------------
+        function iChs = SdPairIdxs2vectorIdxs(obj, sdPairs, iBlk)
+            iChs = [];
+            if ~exist('sdPairs','var')
+                sdPairs = [1,1,0,1];
+            end            
+            if ~exist('iBlk','var') || isempty(iBlk)
+                iBlk = 1;
+            end
+            
+            % Error Checking
+            if size(sdPairs, 2)>1 && size(sdPairs, 2)~=4
+                fprintf('ERROR: invalid sdPair. sdPair has to be a Nx4 2D array\n');
+                return;
+            end
+            
+            
+            % If sdPairs argument is a column vector then we are done because channels are 
+            % already specified in the output format i.e., as single number indices. 
+            if size(sdPairs, 2)==1
+                iChs = sdPairs;
+                return;
+            end            
+                        
+            ml = obj.data(1).GetMeasurementList('matrix', iBlk);
+            
+            % Error checking
+            if isempty(ml)
+                return
+            end
+            
+            for ii = 1:size(sdPairs,1)
+                k = find(ml(:,1)==sdPairs(ii,1)  &  ml(:,2)==sdPairs(ii,2)  &  ml(:,3)==sdPairs(ii,3)  &  ml(:,4)==sdPairs(ii,4));
+                if isempty(k)
+                    continue;
+                end
+                iChs(ii,1) = k;
+            end
+        end
+        
+        
+        
+        % ----------------------------------------------------------------------------------
+        function sdPairs = VectorIdxs2SdPairIdxs(obj, iChs, iBlk)
+            if ~exist('iChs','var')
+                iChs = 1;
+            end            
+            if ~exist('iBlk','var') || isempty(iBlk)
+                iBlk = 1;
+            end
+            
+            % If sdPairs argument is not a column vector then we are done;  because the 
+            % channels are already specified in the output format i.e., as a 2d array. 
+            if size(iChs, 2)>1
+                sdPairs = iChs;
+                return;
+            end
+            
+            ml = obj.data(1).GetMeasurementList('matrix', iBlk);
+            
+            % Remove any invalid indices
+            iChs(iChs==0) = [];
+            iChs(iChs>size(ml,1)) = [];
+            
+            sdPairs = ml(iChs,:);
+        end
+        
+        
+        
+        % ----------------------------------------------------------------------------------
+        function hAxes = DisplayProbe(obj, chSelect, chSelectColors, hAxes)
+            % Parse args
+            if ~exist('chSelect','var')
+                chSelect = [];
+            end
+            if ~exist('chSelectColors','var')                
+                chSelectColors = repmat([1.0, 0.5, 0.2], size(chSelect,1),1);
+            end
+            if ~exist('hAxes','var')
+                hAxes = [];
+            end
+            
+            % If chSelect is in the form of a column vector rather than sd pairs
+            % then convert to sd pairs
+            chSelect = obj.VectorIdxs2SdPairIdxs(chSelect);            
+            
+            freememoryflag = false;
+            if ~isempty(obj) && obj.IsEmpty()
+                obj.acquired.Load();
+                freememoryflag = true;
+            end
+            
+            % Set up the axes
+            bbox = obj.GetSdgBbox();
+            if isempty(hAxes)
+                k = find(obj.hFig(2,:)==-1);
+                
+                % See if there's a data plot associated with this probe display
+                % If there is get its name and use it to name this figure
+                plotname = '';
+                if ishandle(obj.hFig(1,k(1)))
+                    plotname = get(obj.hFig(1,k(1)), 'name');
+                end
+                obj.hFig(2,k(1)) = figure('menubar','none', 'NumberTitle','off', 'name',plotname);
+                hAxes = gca;
+            end
+
+            axis(hAxes, [bbox(1), bbox(2), bbox(3), bbox(4)]);
+            gridsize = get(hAxes, {'xlim', 'ylim', 'zlim'});
+            if ismac() || islinux()
+                fs = 18;
+            else
+                fs = 11;
+            end
+
+            % Get probe paramaters
+            probe = obj.GetProbe();
+            srcpos = probe.sourcePos2D;
+            detpos = probe.detectorPos2D;
+            ml = obj.GetMeasurementList('matrix');
+            lstSDPairs = find(ml(:,4)==1);
+            
+            % Draw all channels
+            for ii = 1:length(lstSDPairs)
+                hCh(ii) = line2(srcpos(ml(lstSDPairs(ii),1),:), detpos(ml(lstSDPairs(ii),2),:), [], gridsize, hAxes);
+                col = [1.00 1.00 1.00] * 0.85;
+                if ~isempty(chSelect)
+                    k = find(chSelect(:,1)==ml(lstSDPairs(ii),1) & chSelect(:,2)==ml(lstSDPairs(ii),2));
+                    if ~isempty(k)
+                        col = chSelectColors(k(1),:);
+                    end
+                end
+                set(hCh(ii), 'color',col, 'linewidth',2, 'linestyle','-', 'userdata',ml(lstSDPairs(ii),1:2));
+            end
+            
+            % ADD SOURCE AND DETECTOR LABELS
+            for iSrc = 1:size(srcpos,1)
+                if ~isempty(find(ml(:,1)==iSrc)) %#ok<*EFIND>
+                    hSD(iSrc) = text( srcpos(iSrc,1), srcpos(iSrc,2), sprintf('%d', iSrc), 'fontsize',fs, 'fontweight','bold', 'color','r' );
+                    set(hSD(iSrc), 'horizontalalignment','center', 'edgecolor','none', 'Clipping', 'on');
+                end
+            end
+            for iDet = 1:size(detpos,1)
+                if ~isempty(find(ml(:,2)==iDet))
+                    hSD(iDet+iSrc) = text( detpos(iDet,1), detpos(iDet,2), sprintf('%d', iDet), 'fontsize',fs, 'fontweight','bold', 'color','b' );
+                    set(hSD(iDet+iSrc), 'horizontalalignment','center', 'edgecolor','none', 'Clipping', 'on');
+                end
+            end
+            
+            if freememoryflag
+                obj.FreeMemory();
+            end            
+        end        
+        
+        
+
     end
     
     

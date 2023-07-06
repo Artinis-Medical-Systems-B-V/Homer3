@@ -1,5 +1,6 @@
 % SYNTAX:
-% [yavg, yavgstd, tHRF, nTrials, ynew, yresid, ysum2, beta, R, hmrstats] = hmrR_GLM(data, stim, probe, mlActAuto, Aaux, tIncAuto, trange, rcMap, glmSolveMethod, idxBasis, paramsBasis, rhoSD_ssThresh, flagNuisanceRMethod, driftOrder, c_vector)
+% [data_yavg, data_yavgstd, nTrials, data_ynew, data_yresid, data_ysum2, beta_blks, yR_blks, hmrstats] = ...
+% hmrR_GLM(data_y, stim, probe, mlActAuto, Aaux, tIncAuto, rcMap, trange, glmSolveMethod, idxBasis, paramsBasis, rhoSD_ssThresh, flagNuisanceRMethod, driftOrder, c_vector)
 %
 % UI NAME:
 % GLM_HRF_Drift_SS
@@ -23,7 +24,8 @@
 % rcMap - An array of cells (1 x #fNIRS channels) containing aux regressor
 %           indices for individual regressor-channel mapping. Currently
 %           only relevant when flagNuisanceRMethod = 3 (tCCA regressors).
-% trange - defines the range for the block average [tPre tPost]
+% trange - defines the range for the block average [tPre tPost dt]. If dt
+%           defined, time series are interpolated prior to 
 % glmSolveMethod - this specifies the GLM solution method to use
 %            1. use ordinary least squares (Ye et al (2009). NeuroImage, 44(2), 428?447.)
 %            2. use iterative weighted least squares (Barker,
@@ -43,18 +45,18 @@
 % 			         (t/(p*q))^p * exp(p-t/q)
 %                Defaults: p=8.6 q=0.547
 %                The peak is at time p*q.  The FWHM is about 2.3*sqrt(p)*q.
-% paramsBasis - Parameters for the basis function depends on idxBasis
-%               idxBasis=1 [stdev step ~ ~ ~ ~] where stdev is the width of the
+% paramsBasis - Parameters for the basis function (chosen via idxBasis)
+%               if idxBasis=1 [stdev step ~ ~ ~ ~] where stdev is the width of the
 %                  gaussian and step is the temporal spacing between
 %                  consecutive gaussians
-%               idxBasis=2. [tau sigma] applied to both HbO and HbR
-%                  or [tau1 sigma1 tau2 sigma2]
+%               if idxBasis=2. [tau sigma] applied to both HbO and HbR
+%                  or [tau1 sigma1 tau2 sigma2] recommended values [0.1 3.0 1.8 3.0]
 %                  where the 1 (2) indicates the parameters for HbO (HbR).
-%               idxBasis=3 [tau sigma] applied to both HbO and HbR
-%                  or [tau1 sigma1 tau2 sigma2]
+%               if idxBasis=3 [tau sigma] applied to both HbO and HbR
+%                  or [tau1 sigma1 tau2 sigma2] recommended values [0.1 3.0 1.8 3.0]
 %                  where the 1 (2) indicates the parameters for HbO (HbR).
-%               idxBasis=4 [p q] applied to both HbO and HbR
-%                  or [p1 q1 p2 q2]
+%               if idxBasis=4 [p q] applied to both HbO and HbR
+%                  or [p1 q1 p2 q2] recommended values [0.1 3.0 1.8 3.0]
 %                  where the 1 (2) indicates the parameters for HbO (HbR).
 % rhoSD_ssThresh - max distance for a short separation measurement. Set =0
 %          if you do not want to regress the short separation measurements.
@@ -96,7 +98,7 @@
 % trange: [-2.0, 20.0]
 % glmSolveMethod: 1
 % idxBasis: 1
-% paramsBasis: [1.0 1.0 0.0 0.0]
+% paramsBasis: [1.0 1.0]
 % rhoSD_ssThresh: 15.0
 % flagNuisanceRMethod: 1
 % driftOrder: 3
@@ -109,15 +111,16 @@ function [data_yavg, data_yavgstd, nTrials, data_ynew, data_yresid, data_ysum2, 
     hmrR_GLM(data_y, stim, probe, mlActAuto, Aaux, tIncAuto, rcMap, trange, glmSolveMethod, idxBasis, paramsBasis, rhoSD_ssThresh, flagNuisanceRMethod, driftOrder, c_vector)
 
 % Init output
-data_yavg     = DataClass().empty();
-data_yavgstd  = DataClass().empty();
-data_ynew     = DataClass().empty();
-data_ysum2    = DataClass().empty();
-data_yresid   = DataClass().empty();
-beta_blks     = cell(length(data_y),1);
-yR_blks       = cell(length(data_y),1);
-beta_label = [];
-hmrstats = [];
+data_yavg       = DataClass().empty();
+data_yavgstd    = DataClass().empty();
+nTrials         = [];
+data_ynew       = DataClass().empty();
+data_ysum2      = DataClass().empty();
+data_yresid     = DataClass().empty();
+beta_blks       = cell(length(data_y),1);
+yR_blks         = cell(length(data_y),1);
+beta_label      = [];
+hmrstats        = [];
 
 % Check input args
 if isempty(tIncAuto)
@@ -125,6 +128,9 @@ if isempty(tIncAuto)
 end
 if isempty(mlActAuto)
     mlActAuto = cell(length(data_y),1);
+end
+if flagNuisanceRMethod==3 && isempty(rcMap)
+    return
 end
 
 % Get stim vector by instantiating temporary SnirfClass object with this
@@ -136,7 +142,7 @@ stimStates = snirf.GetStims(t);
 stimAmps = snirf.GetStimAmps(t);
 nTrials = repmat({zeros(1, size(stimStates,2))}, length(data_y), 1);
 
-for iBlk=1:length(data_y)
+for iBlk = 1:length(data_y)
     
     data_yavg(iBlk)    = DataClass();
     data_yavgstd(iBlk) = DataClass();
@@ -146,23 +152,20 @@ for iBlk=1:length(data_y)
     
     y      = data_y(iBlk).GetDataTimeSeries('reshape');
     t      = data_y(iBlk).GetTime();
-    ml     = data_y(iBlk).GetMeasListSrcDetPairs();
+    ml     = data_y(iBlk).GetMeasListSrcDetPairs('reshape');
     SrcPos = probe.GetSrcPos();
     DetPos = probe.GetDetPos();
-    if isempty(mlActAuto{iBlk})
-        mlActAuto{iBlk} = ones(size(ml,1),1);
-    end
-    mlAct = mlActAuto{iBlk};
+    
+    mlActMatrix = mlAct_Initialize(mlActAuto{iBlk}, ml);
+    mlAct       = mlAct_Matrix2BinaryVector(mlActMatrix, ml);
+    
     if isempty(tIncAuto{iBlk})
         tIncAuto{iBlk} = ones(length(t),1);
     end
     tInc = tIncAuto{iBlk};
     
-    yavg = [];
-    yavgstd = [];
-    ysum2 = [];
-    
-    dt = t(2)-t(1);
+    dt = t(2) - t(1);
+    fq = 1/dt;
     nPre = round(trange(1)/dt);
     nPost = round(trange(2)/dt);
     nTpts = size(y,1);
@@ -182,7 +185,7 @@ for iBlk=1:length(data_y)
     end
     lstSS = lst(find(rhoSD<=rhoSD_ssThresh & mlAct(lst)==1));
     
-    if isempty(lstSS) || (isempty(Aaux) && flagNuisanceRMethod == 3)
+    if isempty(lstSS)
         fprintf('There are no short separation channels in this probe ...performing regular deconvolution.\n');
         mlSSlst = 0;
     else
@@ -190,29 +193,29 @@ for iBlk=1:length(data_y)
             case 0  % use nearest SS
                 for iML = 1:length(lst)
                     rho = sum((ones(length(lstSS),1)*posM(iML,:) - posM(lstSS,:)).^2,2).^0.5;
-                    [foo,ii] = min(rho);
+                    [~,ii] = min(rho);
                     iNearestSS(iML) = lstSS(ii);
                 end
                 mlSSlst = unique(iNearestSS);
             case 1 % use SS with highest correlation
                 % HbO
                 dc = squeeze(y(:,1,:));
-                dc = (dc-ones(length(dc),1)*mean(dc,1))./(ones(length(dc),1)*std(dc,[],1));
-                cc(:,:,1) = dc'*dc / length(dc);
+                dc = (dc-ones(size(dc, 1),1)*mean(dc,1))./(ones(size(dc, 1),1)*std(dc,[],1));
+                cc(:,:,1) = dc'*dc / size(dc, 1);
                 
                 % HbR
                 dc = squeeze(y(:,2,:));
-                dc = (dc-ones(length(dc),1)*mean(dc,1))./(ones(length(dc),1)*std(dc,[],1));
-                cc(:,:,2) = dc'*dc / length(dc);
+                dc = (dc-ones(size(dc, 1),1)*mean(dc,1))./(ones(size(dc, 1),1)*std(dc,[],1));
+                cc(:,:,2) = dc'*dc / size(dc, 1);
                 
                 clear dc
                 % find short separation channel with highest correlation
                 for iML = 1:size(cc,1)
                     % HbO
-                    [foo,ii] = max(cc(iML,lstSS,1));
+                    [~,ii] = max(cc(iML,lstSS,1));
                     iNearestSS(iML,1) = lstSS(ii);
                     % HbR
-                    [foo,ii] = max(cc(iML,lstSS,2));
+                    [~,ii] = max(cc(iML,lstSS,2));
                     iNearestSS(iML,2) = lstSS(ii);
                 end
             case 2 % use average of all active SS as regressor
@@ -223,8 +226,6 @@ for iBlk=1:length(data_y)
                 elseif iscell(rcMap{iBlk}) % use channel regressor map
                     mlSSlst = 1:size(rcMap,2);
                 end
-                
-                
         end
     end
     
@@ -236,6 +237,7 @@ for iBlk=1:length(data_y)
     nCond = length(lstCond); % size(stimStates,2);
     nTrials{iBlk} = zeros(nCond,1);
     onset = zeros(nT, nCond);
+    avg_pulses = {};
     for iCond = 1:nCond
         lstT = find(stimStates(:, lstCond(iCond)) == 1);  % Indices of stims enabled (== 1)
         lstp = find((lstT+nPre) >= 1 & (lstT+nPost) <= nTpts);  % Indices of stims not clipped by signal
@@ -246,6 +248,7 @@ for iBlk=1:length(data_y)
         if ~isempty(stim(lstCond(iCond)).data)
             durations = stim(lstCond(iCond)).data(:, 2);
             amplitudes = stim(lstCond(iCond)).data(:, 3);
+            avg_pulses{iCond} = ones(round(mean(durations) / dt), 1); %#ok<AGROW>
             for i = 1:length(starts)
                 if idxBasis == 1  % Gaussian has no duration T (yet)
                    pulse_duration = 1; 
@@ -451,22 +454,11 @@ for iBlk=1:length(data_y)
     
     % Exit if not enough data to analyze the 3 here is arbitrary.
     % Certainly needs to be larger than 1
-    if length(lstInc)<3*size(A,2) | nCond==0
+    if length(lstInc)<3*size(A,2) || nCond==0
         warning('Not enough data to find a solution')
         yavg    = zeros(ntHRF,nCh,3,nCond);
         yavgstd = zeros(ntHRF,nCh,3,nCond);
         ysum2   = zeros(ntHRF,nCh,3,nCond);
-        yresid  = zeros(nT,3,nCh);
-        ynew    = zeros(nT,3,nCh);
-        
-        yavg    = permute(yavg,[1 3 2 4]);
-        yavgstd = permute(yavgstd,[1 3 2 4]);
-        ysum2   = permute(ysum2,[1 3 2 4]);
-        ynew    = y;
-        yresid  = zeros(size(y));
-        
-        beta = [];
-        yR = [];
         return
     end
     
@@ -492,8 +484,8 @@ for iBlk=1:length(data_y)
         for iSS = 1:length(mlSSlst)
             
             lstMLtmp = 1:size(ml,1);
-            if mlSSlst(iSS)==0
-                lstML = lstMLtmp(find(mlAct(lstMLtmp)==1));
+            if mlSSlst(iSS)==0 && isempty(Aaux)
+                lstML = transpose(lstMLtmp(find(mlAct(lstMLtmp)==1)));
                 % lstML = 1:size(y,3);
                 At = A(:,:,conc);
             elseif flagNuisanceRMethod==0
@@ -523,7 +515,7 @@ for iBlk=1:length(data_y)
                 end
                 
             elseif flagNuisanceRMethod==2
-                lstML = lstMLtmp(find(mlAct(lstMLtmp)==1));
+                lstML = transpose(lstMLtmp(find(mlAct(lstMLtmp)==1))); %#ok<*FNDSB>
                 % lstML = 1:size(y,3);
                 Ass = mean(y(:,conc,lstSS),3);
                 At = [A(:,:,conc) Ass];
@@ -537,7 +529,7 @@ for iBlk=1:length(data_y)
                 
             elseif flagNuisanceRMethod==3
                 if ischar(rcMap{iBlk}) % no channel map: use all tCCA regressors for one group of all channels
-                    lstML = lstMLtmp(find(mlAct(lstMLtmp)==1));
+                    lstML = transpose(lstMLtmp(find(mlAct(lstMLtmp)==1)));
                     At = [A(:,:,conc) Aaux];
                     
                     if iSS == 1 && conc == 1
@@ -548,7 +540,7 @@ for iBlk=1:length(data_y)
                     end
                     
                 elseif iscell(rcMap{iBlk}) % channel map: each single regressor corresponds to one channel (nCH groups)
-                    lstML = lstMLtmp(find(mlAct(rcMap{iBlk}{conc,iSS})==1));
+                    lstML = transpose(lstMLtmp(find(mlAct(rcMap{iBlk}{conc,iSS})==1)));
                     Atcca = Aaux{iBlk}(:,rcMap{conc,iSS});
                     At = [A(:,:,conc) Atcca];
                     
@@ -609,7 +601,7 @@ for iBlk=1:length(data_y)
                     ytmp = y(lstInc,conc,lstML);
                     for chanIdx=1:length(lstML)
                         ytmp2 = y(lstInc,conc,lstML(chanIdx));
-                        [dmoco, beta, tstat(:,lstML(chanIdx),conc), pval(:,lstML(chanIdx),conc), sigma, CovB(:,:,lstML(chanIdx),conc), dfe, w, P, f] = ar_glm_final(squeeze(ytmp2),At(lstInc,:));
+                        [dmoco, beta, tstat(:,lstML(chanIdx),conc), pval(:,lstML(chanIdx),conc), sigma, CovB(:,:,lstML(chanIdx),conc), dfe, w, P, f] = ar_glm_final(squeeze(ytmp2),At(lstInc,:), round(fq*2));
 
                         foo(:,lstML(chanIdx),conc)=beta;
                         ytmp(:,1,chanIdx) = dmoco; %We also need to keep my version of "Yvar" and "Bvar"                    
@@ -629,6 +621,12 @@ for iBlk=1:length(data_y)
                         yavg(:,lstML,conc,iCond)=tbasis*tb(:,lstML,conc,iCond);
                     else
                         yavg(:,lstML,conc,iCond)=tbasis(:,:,conc)*tb(:,lstML,conc,iCond);
+                    end
+                    if idxBasis > 1
+                        for iML = transpose(lstML)
+                            convolved = conv(yavg(:, iML, conc, iCond), avg_pulses{iCond});
+                            yavg(:, iML, conc, iCond) = convolved(1:size(yavg, 1));  % Truncate convolution
+                        end
                     end
                 end
                 
@@ -659,7 +657,7 @@ for iBlk=1:length(data_y)
                         if nCond > 1
                             if (sum(abs(c_vector)) ~= 0) && (size(c_vector,2) == nCond)
                                 
-                                if ~exist('cv_extended') == 1
+                                if ~exist('cv_extended','var') == 1
                                     cv_dummy = [];
                                     for m = 1:nCond
                                         cv_dummy = [cv_dummy ones(1,nB)*c_vector(m)];
@@ -693,7 +691,7 @@ for iBlk=1:length(data_y)
                         if nCond > 1
                             if (sum(abs(c_vector)) ~= 0) && (size(c_vector,2) == nCond)
                                 
-                                if ~exist('cv_extended') == 1
+                                if ~exist('cv_extended','var') == 1
                                     cv_dummy = [];
                                     for m = 1:nCond
                                         cv_dummy = [cv_dummy ones(1,nB)*c_vector(m)];
@@ -804,7 +802,7 @@ for iBlk=1:length(data_y)
 % stats struct
     if glmSolveMethod == 1 % for OLS
         % GLM stats for each condition
-        if exist('tval')
+        if exist('tval','var')
             % set pruned channels tval to zero and pval to NaN
             tval(:,find(mlAct(1:size(ml,1))==0),:) = 0;
             pval(:,find(mlAct(1:size(ml,1))==0),:) = NaN;
@@ -815,7 +813,7 @@ for iBlk=1:length(data_y)
             hmrstats.ml = ml;
         end
     else                   % for iWLS
-        if exist('tstat')
+        if exist('tstat','var')
             % set pruned channels tval to zero and pval to NaN
             tstat(:,find(mlAct(1:size(ml,1))==0),:) = 0;
             pval(:,find(mlAct(1:size(ml,1))==0),:) = NaN;
@@ -829,7 +827,7 @@ for iBlk=1:length(data_y)
     
     % GLM stats for contrast between conditions, if c_vector exists
     if (sum(abs(c_vector)) ~= 0) && (size(c_vector,2) == nCond) && nCond>1
-        if exist('tval_contrast')
+        if exist('tval_contrast','var')
             % set pruned channels tval to zero and pval to NaN
             tval_contrast(:,find(mlAct(1:size(ml,1))==0),:) = 0;
             pval_contrast(:,find(mlAct(1:size(ml,1))==0),:) = NaN;

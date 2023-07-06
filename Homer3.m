@@ -10,6 +10,7 @@ function unitTest = Homer3(groupDirs, inputFileFormat, unitTest)
 %
 
 global logger
+global cfg
 
 setNamespace('Homer3');
 
@@ -33,18 +34,19 @@ end
 if isempty(unitTest)
     logger = Logger('Homer3');
 elseif unitTest.IsEmpty()
-    logger = InitLogger(logger);
+    logger = InitLogger(logger, 'UnitTestsAll');
 else
     return;
 end
+
 logger.CurrTime();
 cfg = ConfigFileClass();
 if strcmp(cfg.GetValue('Logging'), 'off')
     logger.SetDebugLevel(logger.Null());
 end
-PrintSystemInfo(logger, 'Homer3');
+
+PrintSystemInfo(logger, 'Homer3', getArgs(groupDirs, inputFileFormat, unitTest, nargin));
 checkForHomerUpdates();
-logger.Write(sprintf('Opened application config file %s\n', cfg.filename))
 gdir = cfg.GetValue('Last Group Folder');
 if isempty(gdir)
     if isdeployed()
@@ -57,7 +59,25 @@ try
 catch ME
     % Clean up in case of error make sure all open file handles are closed 
     % so we don't leave the application in a bad state
+    cfg.Close();
+    printStack(ME);
     logger.Close();
     rethrow(ME);
 end
+
+
+
+
+% ------------------------------------------------------------------------
+function args = getArgs(groupDirs, inputFileFormat, unitTest, nargin)
+if nargin == 0
+    args = {};
+elseif nargin == 1
+    args = {groupDirs};
+elseif nargin == 2
+    args = {groupDirs, inputFileFormat};
+elseif nargin == 3
+    args = {groupDirs, inputFileFormat, unitTest};
+end
+   
 

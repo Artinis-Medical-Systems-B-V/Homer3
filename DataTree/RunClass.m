@@ -1,9 +1,5 @@
 classdef RunClass < TreeNodeClass
-    
-    properties % (Access = private)
-        acquired;
-    end
-    
+       
     methods
                 
         % ----------------------------------------------------------------------------------
@@ -12,14 +8,14 @@ classdef RunClass < TreeNodeClass
             % Syntax:
             %   obj = RunClass()
             %   obj = RunClass(filename);
-            %   obj = RunClass(filename, iGroup, iSubj, iRun);
+            %   obj = RunClass(filename, iGroup, iSubj, iSess, iRun);
             %   obj = RunClass(run);
             %
             % Example 1:
-            %   run1     = RunClass('./s1/neuro_run01.nirs',1,1,1);
+            %   run1     = RunClass('./s1/neuro_run01.nirs',1,1,1,1);
             %   run1copy = RunClass(run1);
             %           
-            obj@TreeNodeClass(varargin);            
+            obj@TreeNodeClass(varargin);
             
             obj.type  = 'run';
             if nargin==0
@@ -30,17 +26,18 @@ classdef RunClass < TreeNodeClass
                 obj.Copy(varargin{1});
                 return;
             elseif isa(varargin{1}, 'FileClass')
-                [~, ~, obj.name] = varargin{1}.ExtractNames();
+                [~, ~, ~, obj.name] = varargin{1}.ExtractNames();
                 obj.path         = varargin{1}.GetFilesPath();  % Fix wrong root path 
             elseif ischar(varargin{1}) && strcmp(varargin{1},'copy')
                 return;
             elseif ischar(varargin{1}) 
                 obj.name = varargin{1};
             end
-            if nargin==4
+            if nargin==5
                 obj.iGroup = varargin{2};
                 obj.iSubj  = varargin{3};
-                obj.iRun   = varargin{4};
+                obj.iSess  = varargin{4};
+                obj.iRun   = varargin{5};
             end
             
             obj.LoadAcquiredData();
@@ -71,8 +68,8 @@ classdef RunClass < TreeNodeClass
         % ----------------------------------------------------------------------------------
         function err = Load(obj)
             err = 0;
-            err1 = obj.LoadDerivedData();
-            err2 = obj.LoadAcquiredData();            
+            err1 = obj.LoadAcquiredData();            
+            err2 = obj.LoadDerivedData();
             if ~(err1==0 && err2==0)
                 err = -1;
             end
@@ -268,6 +265,20 @@ classdef RunClass < TreeNodeClass
         
         
         % ----------------------------------------------------------------------------------
+        function LoadInputVars(obj)
+            
+            % a) Find all variables needed by proc stream
+            args = obj.procStream.GetInputArgs();
+
+            % b) Find these variables in this run
+            for ii = 1:length(args)
+                eval( sprintf('obj.inputVars.%s = obj.GetVar(args{ii});', args{ii}) );
+            end
+        end
+            
+
+        
+        % ----------------------------------------------------------------------------------
         function Calc(obj, options)
             if ~exist('options','var') || isempty(options)
                 options = 'overwrite';
@@ -275,7 +286,7 @@ classdef RunClass < TreeNodeClass
             
             % Update call application GUI using it's generic Update function 
             if ~isempty(obj.updateParentGui)
-                obj.updateParentGui('DataTreeClass', [obj.iGroup, obj.iSubj, obj.iRun]);
+                obj.updateParentGui('DataTreeClass', [obj.iGroup, obj.iSubj, obj.iSess, obj.iRun]);
             end
 
             % Load acquired data
@@ -288,28 +299,18 @@ classdef RunClass < TreeNodeClass
             end
             
             if obj.DEBUG
-                fprintf('Calculating processing stream for group %d, subject %d, run %d\n', obj.iGroup, obj.iSubj, obj.iRun);
+                fprintf('Calculating processing stream for group %d, subject %d, session %d, run %d\n', obj.iGroup, obj.iSubj, obj.iSess, obj.iRun);
             end
             
-            %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-            % Find all variables needed by proc stream, find them in this 
-            % runs, and load them to proc stream input
-            %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-            
-            % a) Find all variables needed by proc stream
-            args = obj.procStream.GetInputArgs();
-
-            % b) Find these variables in this run
-            for ii = 1:length(args)
-                eval( sprintf('obj.outputVars.%s = obj.GetVar(args{ii});', args{ii}) );
-            end
+            % Find all variables needed by proc stream, find them in this run, and load them to proc stream input
+            obj.LoadInputVars();
             
             Calc@TreeNodeClass(obj);
 
             if obj.DEBUG
-                obj.logger.Write(sprintf('Completed processing stream for group %d, subject %d, run %d\n', obj.iGroup, obj.iSubj, obj.iRun));
+                obj.logger.Write(sprintf('Completed processing stream for group %d, subject %d, session %d, run %d\n', obj.iGroup, obj.iSubj, obj.iSess, obj.iRun));
                 obj.logger.Write('\n')
-            end            
+            end
         end
 
 
@@ -323,6 +324,19 @@ classdef RunClass < TreeNodeClass
             Print@TreeNodeClass(obj, indent);
         end
         
+
+        
+        % ---------------------------------------------------------------
+        function PrintProcStream(obj)
+            fcalls = obj.procStream.GetFuncCallChain();
+            obj.logger.Write('Run processing stream:\n');
+            for ii = 1:length(fcalls)
+                obj.logger.Write('%s\n', fcalls{ii});
+            end
+        end
+        
+            
+            
     end    % Public methods
     
     
@@ -337,40 +351,75 @@ classdef RunClass < TreeNodeClass
             if nargin==1
                 iBlk=1;
             end
+
+            % Sometimes the caller is NOT the current element in which case we need to load 
+            % (when dataStorageScheme = 'file' mode) here explicitely.
+            err = -1;
+            if obj.acquired.IsEmpty()
+                err = obj.acquired.LoadTime();
+            end
             t = obj.acquired.GetTime(iBlk);
+            if err==0
+                obj.acquired.FreeMemory(obj.GetFilename());                
+            end            
         end
         
         
         % ----------------------------------------------------------------------------------
         function t = GetTimeCombined(obj)
+            % Sometimes the caller is NOT the current element in which case we need to load 
+            % (when dataStorageScheme = 'file' mode) here explicitely.
+            err = -1;
+            if obj.acquired.IsEmpty()
+                err = obj.acquired.LoadTime();
+            end
             t = obj.acquired.GetTimeCombined();
+            if err==0
+                obj.acquired.FreeMemory(obj.GetFilename());                
+            end
         end
             
             
         % ----------------------------------------------------------------------------------
         function t = GetAuxiliaryTime(obj)
+            % Sometimes the caller is NOT the current element in which case we need to load 
+            % (when dataStorageScheme = 'file' mode) here explicitely. BUT this needs to be 
+            % optimized to NOT load the whole thing, just aux - see GetTime()/ GetTimeCombined(). 
+            % TBD. jdubb, 08/17/2022
+            err = -1;
+            if obj.acquired.IsEmpty()
+                obj.acquired.Load();
+                err = obj.GetError();                
+            end
             t = obj.acquired.GetAuxiliaryTime();
+            if err==0
+                obj.acquired.FreeMemory(obj.GetFilename());                
+            end
         end
 
         
         % ----------------------------------------------------------------------------------
-        function d = GetRawData(obj, iBlk)
+        function [d, t, ml] = GetRawData(obj, iBlk)
             if nargin<2
                 iBlk = 1;
             end
-            d = obj.acquired.GetDataTimeSeries('', iBlk);
+            [d, t, ml] = obj.acquired.GetDataTimeSeries('', iBlk);
         end
         
         
         % ----------------------------------------------------------------------------------
-        function d = GetDataTimeSeries(obj, options, iBlk)
+        function [d, t, ml] = GetDataTimeSeries(obj, options, iBlk)
             if ~exist('options','var')
                 options = '';
             end
             if ~exist('iBlk','var') || isempty(iBlk)
                 iBlk = 1;
             end
-            d = obj.acquired.GetDataTimeSeries(options, iBlk);
+            if isempty(options) || strcmp(options, 'reshape')
+                [d, t, ml] = obj.acquired.GetDataTimeSeries(options, iBlk);
+            else
+                [d, t, ml] = obj.GetDataTimeSeries@TreeNodeClass(options, iBlk);
+            end
         end
         
         
@@ -391,6 +440,14 @@ classdef RunClass < TreeNodeClass
         
         % ----------------------------------------------------------------------------------
         function SD = GetSDG(obj,option)
+            % Sometimes the caller is NOT the current element in which case we need to load 
+            % (when dataStorageScheme = 'file' mode) here explicitely. BUT this needs to be 
+            % optimized to NOT load the whole thing, just SDG. TBD. jdubb, 08/17/2022
+            err = -1;
+            if obj.acquired.IsEmpty()
+                obj.acquired.Load();
+                err = obj.GetError();                
+            end
             SD.Lambda  = obj.acquired.GetWls();
             if exist('option','var')
                 SD.SrcPos  = obj.acquired.GetSrcPos(option);
@@ -398,6 +455,9 @@ classdef RunClass < TreeNodeClass
             else
                 SD.SrcPos  = obj.acquired.GetSrcPos();
                 SD.DetPos  = obj.acquired.GetDetPos();
+            end
+            if err==0
+                obj.acquired.FreeMemory(obj.GetFilename());                
             end
         end
         
@@ -408,50 +468,101 @@ classdef RunClass < TreeNodeClass
             if ~exist('iBlk','var')
                 iBlk = 1;
             end
-            ch = obj.acquired.GetMeasList(iBlk);
-            obj.procStream.input.SetMeasListActMan(ones(size(ch, 1), 1));
+            ml = obj.acquired.data.GetMeasListSrcDetPairs(iBlk);
+            obj.procStream.input.SetMeasListActMan([ml, ones(size(ml, 1), 1)]);
         end
+        
         
         % ----------------------------------------------------------------------------------
         function InitMlVis(obj, iBlk)
             if ~exist('iBlk','var')
                 iBlk = 1;
             end
-            ch = obj.acquired.GetMeasList(iBlk);
-            obj.procStream.input.SetMeasListVis(ones(size(ch, 1), 1));
+            ml = obj.acquired.data.GetMeasListSrcDetPairs(iBlk);
+            obj.procStream.input.SetMeasListActMan([ml, ones(size(ml, 1), 1)]);
         end
             
+        
+        
         % ----------------------------------------------------------------------------------
-        function ch = GetMeasList(obj, iBlk)
+        function ch = GetMeasList(obj, options, iBlk)
             if ~exist('iBlk','var') || isempty(iBlk)
                 iBlk=1;
+            end
+            if ~exist('options','var')
+                options = '';
             end
             
             ch = struct('MeasList',[], 'MeasListVis',[], 'MeasListActMan',[], 'MeasListActAuto',[]);
             
+            % Sometimes the caller is NOT the current element in which case we need to load 
+            % (when dataStorageScheme = 'file' mode) here explicitely. BUT this needs to be 
+            % optimized to NOT load the whole thing, just SDG. TBD. jdubb, 08/17/2022
+            err = -1;
+            if obj.acquired.IsEmpty()
+                obj.acquired.Load();
+                err = obj.GetError();
+            end
+            
             ch.MeasList        = obj.acquired.GetMeasList(iBlk);
             ch.MeasListActMan  = obj.procStream.GetMeasListActMan(iBlk);
             ch.MeasListActAuto = obj.procStream.GetMeasListActAuto(iBlk);
-            ch.MeasListVis     = obj.procStream.GetMeasListVis(iBlk);
-            if isempty(ch.MeasListActMan)
-                obj.InitMlActMan();  % TODO find a more sensical place to do this
-                ch.MeasListActMan  = obj.procStream.GetMeasListActMan(iBlk);
+            
+            ch.MeasListActMan  = mlAct_Initialize(ch.MeasListActMan, ch.MeasList);
+            ch.MeasListActAuto = mlAct_Initialize(ch.MeasListActAuto, ch.MeasList);
+            if strcmp(options,'reshape')
+                ch.MeasList = sortrows(ch.MeasList);
             end
-            if isempty(ch.MeasListActAuto)
-                ch.MeasListActAuto = ones(size(ch.MeasList,1),1);
+            if err==0
+                obj.acquired.FreeMemory(obj.GetFilename());                
             end
-            if isempty(ch.MeasListVis)
-                obj.InitMlVis();
-                ch.MeasListVis = obj.procStream.GetMeasListVis(iBlk);
-            end
-            ch.MeasListAct     = bitand(ch.MeasListActMan, ch.MeasListActMan);
         end
 
+        
+        
+        % ----------------------------------------------------------------------------------
+        function mlAct = GetActiveChannels(obj)           
+            % Load to memory if needed
+            err = -1;
+            if obj.procStream.output.IsEmpty()
+                obj.Load();
+                err = 0;
+            end
+            
+            mlAct = obj.GetVar('mlActAuto');
+            if ~isempty(mlAct)
+                mlAct = mlAct{1};
+            end
+            
+            % Free memory
+            if err==0
+                obj.FreeMemory();
+            end
+        end
+        
+        
         
         % ----------------------------------------------------------------------------------
         function SetStims_MatInput(obj, s, t, CondNames)
             obj.procStream.SetStims_MatInput(s, t, CondNames);
         end
+        
+        
+        
+        % ----------------------------------------------------------------------------------
+        function ReloadStim(obj)
+            % Update call application GUI using it's generic Update function 
+            if ~isempty(obj.updateParentGui)
+                obj.updateParentGui('DataTreeClass', [obj.iGroup, obj.iSubj, obj.iSess, obj.iRun]);
+            end
+            if obj.DEBUG
+                fprintf('group %d, subject %d, session %d, run %d\n', obj.iGroup, obj.iSubj, obj.iSess, obj.iRun);
+            end
+            obj.acquired.LoadStim(obj.acquired.GetFilename());
+            obj.procStream.CopyStims(obj.acquired)
+            pause(.5)
+        end
+        
         
         
         % ----------------------------------------------------------------------------------
@@ -507,6 +618,10 @@ classdef RunClass < TreeNodeClass
         
         % ----------------------------------------------------------------------------------
         function bbox = GetSdgBbox(obj)
+            if obj.acquired.IsEmpty()
+                % No need to load whole of acquired data need only probe here
+                obj.acquired.LoadProbe(obj.acquired.GetFilename());
+            end
             bbox = obj.acquired.GetSdgBbox();
         end
         
@@ -658,12 +773,19 @@ classdef RunClass < TreeNodeClass
             obj.procStream.DeleteStimColumn(idx);
         end
         
+        
         % ----------------------------------------------------------------------------------
         function RenameStimColumn(obj, oldname, newname)
             if ~exist('oldname', 'var') || ~exist('newname', 'var')
                 return;
             end
             obj.procStream.RenameStimColumn(oldname, newname);
+        end
+
+        
+        % ----------------------------------------------------------------------------------
+        function probe = GetProbe(obj)
+            probe = obj.acquired.GetProbe();
         end
         
         % ----------------------------------------------------------------------------------
@@ -769,6 +891,39 @@ classdef RunClass < TreeNodeClass
         
         
         % ----------------------------------------------------------------------------------        
+        function ExportStim(obj, options)            
+            global cfg
+            if ~exist('options','var')
+                options = '';
+                if strcmpi(cfg.GetValue('Load Stim from TSV file'), 'no')
+                    options = 'regenerate';
+                end
+            end
+            SnirfFile2Tsv(obj.acquired, '', options);
+        end
+        
+        
+        % ----------------------------------------------------------------------------------
+        function fname = DeleteExportStim(obj)
+            fname = obj.acquired.GetStimTsvFilename();
+            if ispathvalid(fname)
+                try
+                    fprintf('Delete  %s\n', fname)
+                    delete(fname);
+                catch
+                end
+            end
+        end
+        
+    end
+    
+    
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    %
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    methods
+        
+        % ----------------------------------------------------------------------------------        
         function nbytes = MemoryRequired(obj, option)
             if ~exist('option','var')
                 option = 'memory';
@@ -835,15 +990,6 @@ classdef RunClass < TreeNodeClass
         end
         
         
-        
-        % ----------------------------------------------------------------------------------
-        function ExportHRF(obj, ~, iBlk)
-            if ~exist('iBlk','var') || isempty(iBlk)
-                iBlk = 1;
-            end
-            obj.ExportHRF@TreeNodeClass('', iBlk);
-        end
-
         
         % ----------------------------------------------------------------------------------
         function r = ListOutputFilenames(obj, options)

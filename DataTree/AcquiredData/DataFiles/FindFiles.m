@@ -58,17 +58,16 @@ end
 % Check files data set for errors. If there are no valid
 % nirs files don't attempt to load them.
 files = DataFilesClass();
-while files.isempty()
+while files.IsEmpty()
     switch fmt
         case {'snirf','.snirf'}
             files = DataFilesClass(dirnameGroup, 'snirf');
-            filesSrc = DataFilesClass(dirnameGroup, 'nirs', '', false);           
-            if ~filesSrc.isempty()
+            filesSrc = DataFilesClass(dirnameGroup, 'nirs', '', false);
+            if ~filesSrc.IsEmpty()
                 nfolders = length(filesSrc.files)-filesSrc.nfiles;
                 if nfolders==0
                     nfolders = 1;
                 end
-                fprintf('FindFiles: Found %d .nirs data files in %d folders\n', filesSrc.nfiles, nfolders);
             end
             
             % Search for source acquisition files in .nirs format which have not
@@ -77,7 +76,7 @@ while files.isempty()
             if ~all(found)
                 q = GetOptionsForIncompleteDataSet(files, filesSrc);
                 if q==2
-                    if files.isempty()
+                    if files.IsEmpty()
                         files = [];
                     end
                     return;
@@ -87,17 +86,16 @@ while files.isempty()
             end
         case {'snirfonly'}
             files = DataFilesClass(dirnameGroup, 'snirf');
-            if files.isempty()
+            if files.IsEmpty()
                 files = [];
                 return;
             end
         case {'nirs','.nirs'}
             files = DataFilesClass(dirnameGroup, 'nirs');
         otherwise
-            q = menu(sprintf('Homer3 only supports file formats: {%s}. Please choose one.', cell2str(supportedFormats(:,1))), ...
-                    'OK','CANCEL');
+            q = MenuBox(sprintf('Homer3 only supports file formats: {%s}. Please choose one.', cell2str(supportedFormats(:,1))), ...
+                    {'OK','CANCEL'}); 
             if q==2
-                files = DataFilesClass(dirnameGroup);
                 return;
             else
                 selection = checkboxinputdlg(supportedFormats(:,1), 'Select Supported File Format');
@@ -110,29 +108,31 @@ while files.isempty()
             end
     end
     
-    if files.isempty()
-        switch fmt
-            case {'snirf','.snirf'}
-                msg{1} = sprintf('Homer3 did not find any %s data files to load in the current group folder. ', fmt);
-                msg{2} = sprintf('Do you want to select another group folder?');
-                q = MenuBox(msg, {'YES','NO'});
-                if q==2
-                    files = DataFilesClass();
-                    return;
-                end
-                dirnameGroup = uigetdir(pwd, 'Please select another group folder ...');
-                if dirnameGroup==0
-                    files = DataFilesClass();
-                    return;
-                end
-                
-                % Change current folder to new group
-                cd(dirnameGroup)
-                
-            case {'snirfonly'}
-                files = [];
+    
+    % If no files were found ion the current format then ask user to choose
+    % another group folder
+    if files.IsEmpty()
+        if strcmp(fmt, 'snirfonly')
+            files = [];
+            return
         end
+        
+        msg{1} = sprintf('Homer3 did not find any %s data files to load in the current group folder. ', fmt);
+        msg{2} = sprintf('Do you want to select another group folder?');
+        q = MenuBox(msg, {'YES','NO'});
+        if q==2
+            return;
+        end
+        dirnameGroup = uigetdir(pwd, 'Please select another group folder ...');
+        if dirnameGroup==0
+            files = DataFilesClass(pwd, fmt);
+            return;
+        end
+        
+        % Change current folder to new group
+        cd(dirnameGroup)
     end
+    
 end
 
 
@@ -141,7 +141,7 @@ end
 function  q = GetOptionsForIncompleteDataSet(files, filesSrc)
 if files.config.RegressionTestActive
     q = 1;
-elseif  files.isempty()
+elseif  files.IsEmpty()
     msg{1} = sprintf('Homer3 did not find any .snirf files in the current folder but did find %d .nirs files. ', filesSrc.nfiles);
     msg{2} = sprintf('Do you want to convert .nirs files to .snirf format and load them?');
     q = MenuBox(msg, {'YES','NO'}, 'center');

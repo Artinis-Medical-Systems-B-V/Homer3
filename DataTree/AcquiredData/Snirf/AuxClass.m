@@ -82,7 +82,19 @@ classdef AuxClass < FileLoadSaveClass
                 obj.dataTimeSeries  = HDF5_DatasetLoad(gid, 'dataTimeSeries');
                 obj.time            = HDF5_DatasetLoad(gid, 'time');
                 obj.timeOffset      = HDF5_DatasetLoad(gid, 'timeOffset');
-
+               
+                % Name should not be loaded as a 1x1 cell array, but some
+                % Python interfaces lead to it being saved this way.
+                %
+                % This is due to the string being saved in fixed vs.
+                % variable length format. See: https://support.hdfgroup.org/HDF5/doc1.6/UG/11_Datatypes.html
+                %
+                % As of version 1.0 of the SNIRF specification, this is not
+                % an issue of spec compliance.
+                if iscell(obj.name) && length(obj.name) == 1
+                    obj.name = obj.name{1};
+                end
+                
                 err = obj.ErrorCheck();
                 
                 % Close group
@@ -98,11 +110,15 @@ classdef AuxClass < FileLoadSaveClass
                 end
                 
             end
+            
+            obj.SetError(err); 
         end
 
         
         % -------------------------------------------------------
-        function SaveHdf5(obj, fileobj, location)
+        function err = SaveHdf5(obj, fileobj, location)
+            err = 0;
+            
             % Arg 1
             if ~exist('fileobj', 'var') || isempty(fileobj)
                 error('Unable to save file. No file name given.')
@@ -115,19 +131,21 @@ classdef AuxClass < FileLoadSaveClass
                 location = ['/',location];
             end
             
-            if ~exist(fileobj, 'file')
-                fid = H5F.create(fileobj, 'H5F_ACC_TRUNC', 'H5P_DEFAULT', 'H5P_DEFAULT');
-                H5F.close(fid);
-            end     
+            % Convert file object to HDF5 file descriptor
+            fid = HDF5_GetFileDescriptor(fileobj);
+            if fid < 0
+                err = -1;
+                return;
+            end
             
             if obj.debuglevel.Get() == obj.debuglevel.SimulateBadData()
                 obj.SimulateBadData();
             end
             
-            hdf5write_safe(fileobj, [location, '/name'], obj.name);
-            hdf5write_safe(fileobj, [location, '/dataTimeSeries'], obj.dataTimeSeries);
-            hdf5write_safe(fileobj, [location, '/time'], obj.time);
-            hdf5write_safe(fileobj, [location, '/timeOffset'], obj.timeOffset);
+            hdf5write_safe(fid, [location, '/name'], obj.name);
+            hdf5write_safe(fid, [location, '/dataTimeSeries'], obj.dataTimeSeries, 'array');
+            hdf5write_safe(fid, [location, '/time'], obj.time, 'array');
+            hdf5write_safe(fid, [location, '/timeOffset'], obj.timeOffset, 'array');
         end
         
         
@@ -242,6 +260,10 @@ classdef AuxClass < FileLoadSaveClass
             end
             if length(obj.dataTimeSeries) ~= length(obj.time)
                 err = -4;
+                return
+            end
+            if ~ischar(obj.name)
+                err = -5;
                 return
             end
         end

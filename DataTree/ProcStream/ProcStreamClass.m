@@ -9,29 +9,34 @@ classdef ProcStreamClass < handle
         config;
     end
     
+    properties (Access = private)
+        datatypes;
+    end
+    
     methods
         
         % ----------------------------------------------------------------------------------
         function obj = ProcStreamClass(acquired)
+            global cfg
+            
+            cfg = InitConfig(cfg);           
+            
             if nargin<1
                 acquired=[];
             end
             obj.fcalls = FuncCallClass().empty();
             obj.fcallsIdxs = [];
             obj.config = struct('procStreamCfgFile','', 'defaultProcStream','','suffix','');
-            cfg = ConfigFileClass();
             obj.config.procStreamCfgFile    = cfg.GetValue('Processing Stream Config File');
             obj.config.regressionTestActive = cfg.GetValue('Regression Test Active');
-            copyOptions = '';
-            if strcmpi(obj.getDefaultProcStream(), '_nirs')
-                copyOptions = 'extended';
-            end
+            
+            obj.InitDataTypes();
             
             % By the time this class constructor is called we should already have a saved registry 
             % to load. (Defintiely would not want to be generating the registry for each instance of this class!!)
             obj.reg = RegistriesClass();
             
-            obj.input = ProcInputClass(acquired, copyOptions);
+            obj.input = ProcInputClass(acquired);
             obj.output = ProcResultClass();
             
             if nargin==0
@@ -39,6 +44,7 @@ classdef ProcStreamClass < handle
             end
             obj.CreateDefault();
         end
+        
         
         
         % ----------------------------------------------------------------------------------
@@ -93,9 +99,12 @@ classdef ProcStreamClass < handle
         
         % --------------------------------------------------------------
         function CopyStims(obj, obj2)
-            obj.input.CopyStims(obj2.input);
+            if isa(obj2, 'ProcStreamClass')
+                obj.input.CopyStims(obj2.input);
+            else
+                obj.input.CopyStims(obj2);
+            end
         end
-        
         
         
         % ----------------------------------------------------------------------------------
@@ -118,10 +127,19 @@ classdef ProcStreamClass < handle
 
         % ----------------------------------------------------------------------------------
         function B = isequal(obj, obj2)
-            B = 0;
-            if isa(obj2, 'ProcStream')
-                for ii=1:length(obj.fcalls)
+            B = false;
+            if isa(obj2, 'ProcStreamClass')
+                % Compare in both direction obj -> obj2  AND  obj2 -> obj
+                for ii = 1:length(obj.fcalls)
                     if ii>length(obj2.fcalls)
+                        return
+                    end
+                    if obj.fcalls(ii) ~= obj2.fcalls(ii)
+                        return;
+                    end
+                end
+                for ii = 1:length(obj2.fcalls)
+                    if ii>length(obj.fcalls)
                         return
                     end
                     if obj.fcalls(ii) ~= obj2.fcalls(ii)
@@ -153,7 +171,9 @@ classdef ProcStreamClass < handle
                 if length(obj.fcalls) ~= length(obj2.procFunc.funcName)
                     return;
                 end
-                for ii=1:length(obj.fcalls)
+                
+                % Compare in both direction obj -> obj2  AND  obj2 -> obj
+                for ii = 1:length(obj.fcalls)
                     obj3.funcName        = obj2.procFunc.funcName{ii};
                     obj3.funcNameUI      = obj2.procFunc.funcNameUI{ii};
                     obj3.funcArgOut      = obj2.procFunc.funcArgOut{ii};
@@ -167,8 +187,10 @@ classdef ProcStreamClass < handle
                         return;
                     end
                 end
+            else
+                return
             end
-            B = 1;
+            B = true;
         end
 
         
@@ -227,7 +249,45 @@ classdef ProcStreamClass < handle
         
         
         % ----------------------------------------------------------------------------------
-        function Calc(obj, filename)
+        function fcall = GenerateFuncCallString(obj, iFcall)            
+            funcName = obj.GetFuncCallName(iFcall);
+            
+            % Inoput arguments
+            argIn = obj.ParseInputArgs(iFcall);
+            
+            % Users modifiable input parameters
+            paramsIn = obj.ParseInputParams(iFcall);
+            
+            % Output arguments
+            argOut = obj.ParseOutputArgs(iFcall);
+            
+            delimiter = '';
+            if ~isempty(obj.fcalls(iFcall).argIn) && ~isempty(obj.fcalls(iFcall).paramIn)
+                delimiter = ', ';
+            end
+            
+            % call function
+            fcall = sprintf('%s = %s(%s%s%s);', argOut, funcName, argIn, delimiter, paramsIn);
+        end
+        
+        
+        
+        % ----------------------------------------------------------------------------------
+        function fcalls = GetFuncCallChain(obj)
+            N = length(obj.fcalls);
+            fcalls = cell(N,1);            
+            for ii = 1:N
+                fcalls{ii} = obj.GenerateFuncCallString(ii);
+            end
+        end
+        
+        
+        
+        
+        % ----------------------------------------------------------------------------------
+        function fcalls = Calc(obj, filename)
+            global logger
+            
             if ~exist('filename','var')
                 filename = '';
             end
@@ -236,12 +296,14 @@ classdef ProcStreamClass < handle
             FcallsIdxs = obj.GetFcallsIdxs();
             nFcall = length(FcallsIdxs);
             
-            paramOut = {};
-            hwait = waitbar(0, 'Processing...' );
-            for iFcall = FcallsIdxs
-                waitbar( iFcall/nFcall, hwait, sprintf('Processing... %s', obj.GetFcallNamePrettyPrint(iFcall)) );
+            paramsOutStruct = struct();
+            hwait = waitbar_improved(0, 'Processing...' );
                 
-                % Parse obj.input arguments
+            paramOut = {};
+            for iFcall = FcallsIdxs
+                waitbar_improved( iFcall/nFcall, hwait, sprintf('Processing... %s', obj.fcalls(iFcall).GetName()) );
+                
+                % Instantiate all input variables required by function call
                 argIn = obj.GetInputArgs(iFcall);
                 for ii = 1:length(argIn)
                     if ~exist(argIn{ii},'var')
@@ -249,24 +311,18 @@ classdef ProcStreamClass < handle
                     end
                 end
                 
-                % Parse obj.input parameters
-                [sargin, p, sarginVal] = obj.ParseInputParams(iFcall); %#ok<ASGLU>
+                fcalls{iFcall} = obj.GenerateFuncCallString(iFcall);
                 
-                % Parse obj.input output arguments
-                sargout = obj.ParseOutputArgs(iFcall);
-                
-                % call function
-                fcall = sprintf('%s = %s%s%s);', sargout, obj.GetFuncCallName(iFcall), obj.fcalls(iFcall).argIn.str, sargin);
                 try
-                    eval( fcall );
+                    eval( fcalls{iFcall} );
                 catch ME
                     msg = sprintf('Function %s generated error at line %d: %s', obj.fcalls(iFcall).name, ME.stack(1).line, ME.message);
                     if strcmp(obj.config.regressionTestActive, 'false')
                         MessageBox(msg);
-                    elseif strcmp(obj.config.regressionTestActive, 'false')
-                        fprintf('%s\n', msg);
                     end
-                    close(hwait);
+                    logger.Write('%s\n', msg);
+                    printStack(ME);
+                    waitbar_improved(hwait, 'close');
                     rethrow(ME)
                 end
                 
@@ -274,7 +330,7 @@ classdef ProcStreamClass < handle
                 
                 % remove '[', ']', and ','
                 foos = obj.fcalls(iFcall).argOut.str;
-                for ii=1:length(foos)
+                for ii = 1:length(foos)
                     if foos(ii)=='[' || foos(ii)==']' || foos(ii)==',' || foos(ii)=='#'
                         foos(ii) = ' ';
                     end
@@ -283,7 +339,7 @@ classdef ProcStreamClass < handle
                 % get parameters for Output to obj.output
                 lst = strfind(foos,' ');
                 lst = [0, lst, length(foos)+1]; %#ok<*AGROW>
-                for ii=1:length(lst)-1
+                for ii = 1:length(lst)-1
                     foo2 = foos(lst(ii)+1:lst(ii+1)-1);
                     lst2 = strmatch( foo2, paramOut, 'exact' ); %#ok<MATCH3>
                     idx = strfind(foo2,'foo');
@@ -294,19 +350,105 @@ classdef ProcStreamClass < handle
             end
             
             % Copy paramOut to output
-            paramsOutStruct = struct();
-            for ii=1:length(paramOut)
+            for ii = 1:length(paramOut)
                 eval( sprintf('paramsOutStruct.%s = %s;', paramOut{ii}, paramOut{ii}) );
-            end            
+            end
+            
             obj.output.Save(paramsOutStruct, filename);
             
+            % Save processing stream function calls
+            obj.ExportProcStream(filename, fcalls);
+            
             obj.input.misc = [];
-            close(hwait);
+            waitbar_improved(hwait, 'close');
             
         end
         
         
+        
         % ----------------------------------------------------------------------------------        
+        function SaveInitOutput(obj, pathname, filename)
+            obj.output.SaveInit(pathname, filename)
+        end
+        
+        
+        % ----------------------------------------------------------------------------------        
+        function mlActMan = CompressMlActMan(obj)
+            mlActMan = [];
+
+            % We don't need to compress mlAct man because it is usually not that big 
+            % But even did then we have to modify compressLogicalArray to handle 2d arrays 
+            % instead of just vectors.
+            % mlActMan = compressLogicalArray(obj.input.mlActMan{1});
+            temp = obj.GetVar('mlActMan');
+            if isempty(temp)
+                return
+            end
+            mlActMan = temp{1};
+        end
+        
+        
+        % ----------------------------------------------------------------------------------        
+        function tIncMan = CompresstIncMan(obj)
+            tIncMan = [];
+            if isempty(obj.input.tIncMan)
+                return
+            end
+            tIncMan = compressLogicalArray(obj.input.tIncMan{1});
+        end
+                
+                
+                
+        % ----------------------------------------------------------------------------------        
+        function ExportProcStream(obj, filename, fcalls)
+            global logger
+            global cfg
+            temp = obj.output.SetFilename(filename);
+            if isempty(temp)
+                return;
+            end
+            [p,f] = fileparts(temp); 
+            fname = [filesepStandard(p), f, '_processing.json'];
+            if strcmpi(cfg.GetValue('Export Processing Stream Functions'), 'yes')
+                logger.Write('Saving processing stream  %s:\n', fname);
+                appname = sprintf('%s', getNamespace());
+                vernum  = sprintf('v%s', getVernum(appname));
+                dt      = sprintf('%s', char(datetime(datetime, 'Format','MMMM d, yyyy,   HH:mm:ss')));
+                mlActManCompressed = obj.CompressMlActMan();
+                tIncManCompressed = obj.CompresstIncMan();
+                jsonstruct = struct('ProcessingElement',f, 'ApplicationName',appname, 'Version',vernum, ...
+                                    'Dependencies',obj.ExportProcStreamDependencies(), 'DateTime',dt, 'tIncMan',tIncManCompressed, ...
+                                    'mlActMan',mlActManCompressed, 'FunctionCalls',{fcalls});
+                jsonStr = savejson('Processing', jsonstruct);
+                fid = fopen(fname, 'w');
+                fwrite(fid, jsonStr, 'uint8');
+                fclose(fid);
+            else
+                if ispathvalid(fname)
+                    logger.Write('Deleting processing stream  %s:\n', fname);
+                    try
+                        delete(fname)
+                    catch
+                    end
+                end
+            end
+        end
+        
+        
+        
+        
+        % ----------------------------------------------------------------------------------
+        function depStruct = ExportProcStreamDependencies(obj)
+            depStruct = struct();
+            [d, v] = dependencies();
+            for ii = 1:length(d)
+                eval( sprintf('depStruct.%s = ''v%s'';', d{ii}, v{ii}) );
+            end
+        end
+
+        
+        
+        % ----------------------------------------------------------------------------------
         function nbytes = MemoryRequired(obj)
             nbytes(1) = obj.input.MemoryRequired();
             nbytes(2) = obj.output.MemoryRequired();
@@ -393,67 +535,59 @@ classdef ProcStreamClass < handle
         end
         
         
+        
         % ----------------------------------------------------------------------------------
-        function [sargin, p, sarginVal] = ParseInputParams(obj, iFcall)
+        function sargin = ParseInputParams(obj, iFcall)
             sargin = '';
-            sarginVal = '';
+            if ~exist('iFcall', 'var') || isempty(iFcall)
+                iFcall = 1;
+            end
             nParam = length(obj.fcalls(iFcall).paramIn);            
-            p = cell(nParam, 1);
-
             if isempty(obj.fcalls)
                 return;
             end
             if iFcall>length(obj.fcalls)
                 return;
-            end            
+            end
             for iP = 1:nParam
-                p{iP} = obj.fcalls(iFcall).paramIn(iP).value;
-                if length(obj.fcalls(iFcall).argIn.str)==1 && iP==1
-                    sargin = sprintf('%sp{%d}', sargin, iP);
-                    if isnumeric(p{iP})
-                        if length(p{iP})==1
-                            sarginVal = sprintf('%s%s', sarginVal, num2str(p{iP}));
-                        else
-                            sarginVal = sprintf('%s[%s]', sarginVal, num2str(p{iP}));
-                        end
-                    elseif ~isstruct(p{iP})
-                        sarginVal = sprintf('%s,%s', sarginVal, p{iP});
-                    else
-                        sarginVal = sprintf('%s,[XXX]', sarginVal);
-                    end
+                if isempty(sargin)
+                    sargin = obj.fcalls(iFcall).paramIn(iP).DisplayValue();
                 else
-                    sargin = sprintf('%s,p{%d}', sargin, iP);
-                    if isnumeric(p{iP})
-                        if length(p{iP})==1
-                            sarginVal = sprintf('%s,%s', sarginVal, num2str(p{iP}));
-                        else
-                            sarginVal = sprintf('%s,[%s]', sarginVal, num2str(p{iP}));
-                        end
-                    elseif ~isstruct(p{iP})
-                        sarginVal = sprintf('%s,%s', sarginVal, p{iP});
-                    else
-                        sarginVal = sprintf('%s,[XXX]',sarginVal);
-                    end
+                    sargin = sprintf('%s, %s', sargin, obj.fcalls(iFcall).paramIn(iP).DisplayValue());
                 end
             end
         end
         
         
         % ----------------------------------------------------------------------------------
-        function sargout = ParseOutputArgs(obj, iFcall)
-            sargout = '';
+        function argInStr = ParseInputArgs(obj, iFcall)
+            argInStr = '';
+            if ~exist('iFcall', 'var') || isempty(iFcall)
+                iFcall = 1;
+            end
             if isempty(obj.fcalls)
                 return;
             end
             if iFcall>length(obj.fcalls)
                 return;
             end            
-            sargout = obj.fcalls(iFcall).argOut.str;
-            for ii=1:length(obj.fcalls(iFcall).argOut.str)
-                if sargout(ii)=='#'
-                    sargout(ii) = ' ';
-                end
+            argInStr = obj.fcalls(iFcall).argIn.Display();
+        end
+        
+        
+        % ----------------------------------------------------------------------------------
+        function argOutStr = ParseOutputArgs(obj, iFcall)
+            argOutStr = '';
+            if ~exist('iFcall', 'var') || isempty(iFcall)
+                iFcall = 1;
             end
+            if isempty(obj.fcalls)
+                return;
+            end
+            if iFcall>length(obj.fcalls)
+                return;
+            end            
+            argOutStr = obj.fcalls(iFcall).argOut.Display();
         end
         
         
@@ -603,20 +737,13 @@ classdef ProcStreamClass < handle
                 fprintf('Default config file exists. Processing stream will be loaded from %s\n', fname);
                 return;
             end
-            
-            % This pause is a workaround for a matlab bug in version
-            % 7.11 for Linux, where uigetfile won't block unless there's
-            % a breakpoint.
-            pause(.1);
-            [fname, pname] = uigetfile([pathname, '*.cfg'], 'Load Process Options File' );
-            if fname==0
-                fprintf('Loading default config file.\n');
+            fname = OpenFileGUI(procStreamCfgFile, pathname,'Load Processing Options File','.cfg');
+            if isempty(fname)
                 fname = [pathname, procStreamCfgFile];
+                fprintf('Loading default config file.\n');
                 autoGenDefault = true;
-            else
-                fname = [pname, fname];
-            end
-            fname(fname=='\')='/';
+            end            
+            
         end
         
         
@@ -678,9 +805,8 @@ classdef ProcStreamClass < handle
             
             % Reinitialize fcalls since we're going to overwrite them anyway
             obj.fcalls = FuncCallClass().empty();
-            obj.ParseFile(fid, type);
+            err = obj.ParseFile(fid, type);
             fclose(fid);
-            err=0;
         end
         
         
@@ -740,27 +866,35 @@ classdef ProcStreamClass < handle
             if fid<0
                 return;
             end
-            [G, S, R] = obj.FindSections(fid, 'nodefault');
+            [Group, Subj, Sess, Run] = obj.FindSections(fid, 'nodefault');
             fclose(fid);
             
             % Construct new contents
             switch(lower(type))
                 case {'group', 'groupclass', 'grp'}
-                    G = [ sprintf('%% group'); obj.GenerateSection(); sprintf('\n') ];
-                    S = [ sprintf('%% subj');  S; sprintf('\n') ];
-                    R = [ sprintf('%% run');   R; sprintf('\n') ];
-                case {'subj', 'session', 'subjclass'}
-                    G = [ sprintf('%% group'); G; sprintf('\n') ];
-                    S = [ sprintf('%% subj');  obj.GenerateSection(); sprintf('\n') ];
-                    R = [ sprintf('%% run');   R; sprintf('\n') ];
+                    Group = [ sprintf('%% group'); obj.GenerateSection(); sprintf('\n') ]; %#ok<*SPRINTFN>
+                    Subj = [ sprintf('%% subj');  Subj; sprintf('\n') ];
+                    Sess = [ sprintf('%% sess');  Sess; sprintf('\n') ];
+                    Run = [ sprintf('%% run');   Run; sprintf('\n') ];
+                case {'subj', 'subjclass'}
+                    Group = [ sprintf('%% group');  Group; sprintf('\n') ];
+                    Subj = [ sprintf('%% subj');  obj.GenerateSection(); sprintf('\n') ];
+                    Sess = [ sprintf('%% sess');  Sess; sprintf('\n') ];
+                    Run = [ sprintf('%% run');   Run; sprintf('\n') ];
+                case {'sess', 'sessclass'}
+                    Group = [ sprintf('%% group'); Group; sprintf('\n') ];
+                    Subj = [ sprintf('%% subj');  Subj; sprintf('\n') ];
+                    Sess = [ sprintf('%% sess');  obj.GenerateSection(); sprintf('\n')  ];
+                    Run = [ sprintf('%% run');   Run; sprintf('\n') ];
                 case {'run', 'runclass'}
-                    G = [ sprintf('%% group'); G; sprintf('\n') ];
-                    S = [ sprintf('%% subj');  S; sprintf('\n') ];
-                    R = [ sprintf('%% run');   obj.GenerateSection(); sprintf('\n') ];
+                    Group = [ sprintf('%% group'); Group; sprintf('\n') ];
+                    Subj = [ sprintf('%% subj');  Subj; sprintf('\n') ];
+                    Sess = [ sprintf('%% sess');  Sess; sprintf('\n') ];
+                    Run = [ sprintf('%% run');   obj.GenerateSection(); sprintf('\n') ];
                 otherwise
                     return;
             end
-            newcontents = [versionstamp; G; S; R];
+            newcontents = [versionstamp; Group; Subj; Sess; Run];
             
             % Write new contents to file 
             fid = fopen(fname,'w');
@@ -777,10 +911,10 @@ classdef ProcStreamClass < handle
         % Function to extract the 3 proc stream sections - group, subj, and run -
         % from a processing stream config cell array.
         % ---------------------------------------------------------------------
-        function [G, S, R] = FindSections(obj, fid, mode)
+        function [Group, Subj, Sess, Run] = FindSections(obj, fid, mode)
             %
             % Syntax:
-            %    [G, S, R] = obj.FindSections(fid, mode)
+            %    [Group, Subj, Sess, Run] = obj.FindSections(fid, mode)
             %
             % Description:
             %    Read in proc stream config file with file descriptor fid and returns the 
@@ -791,18 +925,21 @@ classdef ProcStreamClass < handle
             % Example: 
             %    fid = fopen('processOpt_ShortSep.cfg');
             %    p = ProcStreamClass();
-            %    [G, S, R] = p.FindSections(fid);
+            %    [Group, Subj, Sess, Run] = p.FindSections(fid);
             %    fclose(fid);
             %
             %    Here's the output:
             %
-            %     G = {
+            %     Group = {
             %          '@ hmrG_SubjAvg [dcAvg,dcAvgStd,nTrials,grpAvgPass] (dcAvgSubjs,dcAvgStdSubjs,SDSubjs,nTrialsSubjs tRange %0.1f�'
             %         }
-            %     S = {
+            %     Subj = {
             %          '@ hmrS_RunAvg [dcAvg,dcAvgStd,nTrials] (dcAvgRuns,dcAvgStdRuns,dcSum2Runs,mlActRuns,nTrialsRuns'
             %         }
-            %     R = {
+            %     Sess = {
+            %          ''
+            %         }
+            %     Run = {
             %         '@ hmrR_Intensity2OD dod (d'
             %         '@ hmrR_MotionArtifact tIncAuto (dod,t,SD,tIncMan tMotion %0.1f 0.5 tMask %0.1f 1.0 STDEVthresh %0.1f 50.0 AMPthresh %0.1f 5.0'
             %         '@ hmrR_BandpassFilt dod (dod,t hpf %0.3f 0.010 lpf %0.3f 0.500'
@@ -814,14 +951,15 @@ classdef ProcStreamClass < handle
                 mode = 'default';
             end
             
-            G = {};
-            S = {};
-            R = {};
+            Group = {};
+            Subj = {};
+            Sess = {};
+            Run = {};
             if ~iswholenum(fid) || fid<0
                 return;
             end
-            iG=1; iS=1; iR=1;
-            section = 'run';   % Run is the default is sections aren't labeled
+            iGroup=1; iSubj=1; iSess=1; iRun=1;
+            section = 'run';   % Run is the default if sections aren't labeled
             while ~feof(fid)
                 ln = fgetl(fid);
                 if isempty(ln) || ~ischar(ln)
@@ -833,7 +971,9 @@ classdef ProcStreamClass < handle
                     switch(lower(str))
                         case {'group','grp'}
                             section = str;
-                        case {'subj','subject','session','sess'}
+                        case {'subj','subject'}
+                            section = str;
+                        case {'session','sess'}
                             section = str;
                         case {'run'}
                             section = str;
@@ -841,25 +981,30 @@ classdef ProcStreamClass < handle
                 elseif ln(1)=='@'
                     switch(lower(section))
                         case {'group','grp'}
-                            G{iG,1} = strtrim(ln); iG=iG+1;
-                        case {'subj','subject','session','sess'}
-                            S{iS,1} = strtrim(ln); iS=iS+1;
+                            Group{iGroup,1} = strtrim(ln); iGroup=iGroup+1;
+                        case {'subj','subject'}
+                            Subj{iSubj,1} = strtrim(ln); iSubj=iSubj+1;
+                        case {'session','sess'}
+                            Sess{iSess,1} = strtrim(ln); iSess=iSess+1;
                         case {'run'}
-                            R{iR,1} = strtrim(ln); iR=iR+1;
+                            Run{iRun,1} = strtrim(ln); iRun=iRun+1;
                     end
                 end
             end
             
             % Generate default contents for all sections which are missing
             if strcmp(mode, 'default')
-                if isempty(G)
-                    G = obj.fcallStrEncodedGroup;
+                if isempty(Group)
+                    Group = obj.fcallStrEncodedGroup;
                 end
-                if isempty(S)
-                    S = obj.fcallStrEncodedSubj;
+                if isempty(Subj)
+                    Subj = obj.fcallStrEncodedSubj;
                 end
-                if isempty(R)
-                    R = obj.fcallStrEncodedRun;
+                if isempty(Sess)
+                    Sess = obj.fcallStrEncodedSess;
+                end
+                if isempty(Run)
+                    Run = obj.fcallStrEncodedRun;
                 end
             end
         end
@@ -950,25 +1095,26 @@ classdef ProcStreamClass < handle
             %              help: '  Excludes stims that fall within the time points identified as �'
             %
             
-            err=-1;
+            err = -1;
             if ~exist('fid','var') || ~iswholenum(fid) || fid<0
                 return;
             end
             if ~exist('type','var')
                 return;
             end
-            [G, S, R] = obj.FindSections(fid);
+            [Group, Subj, Sess, Run] = obj.FindSections(fid);
             switch(lower(type))
                 case {'group', 'groupclass', 'grp'}
-                    obj.Decode(G);
-                case {'subj', 'session', 'subjclass'}
-                    obj.Decode(S);
+                    err = obj.Decode(Group);
+                case {'subj', 'subjclass'}
+                    err = obj.Decode(Subj);
+                case {'sess', 'sessclass'}
+                    err = obj.Decode(Sess);
                 case {'run', 'runclass'}
-                    obj.Decode(R);
+                    err = obj.Decode(Run);
                 otherwise
                     return;
             end
-            err=0;
         end
                    
     end
@@ -984,7 +1130,7 @@ classdef ProcStreamClass < handle
     methods
                 
         % ----------------------------------------------------------------------------------
-        function Decode(obj, section)
+        function err = Decode(obj, section)
             % Syntax:
             %    obj.Decode(section)
             %    
@@ -1027,6 +1173,8 @@ classdef ProcStreamClass < handle
             %       paramIn: [1x1 ParamClass]
             %          help: '  Convert OD to concentrations�'
             % 
+            err = 0;
+            
             if nargin<2
                 return
             end
@@ -1065,6 +1213,7 @@ classdef ProcStreamClass < handle
                             kk=kk+1;
                         else
                             fprintf('  Found no similar entries. Discarding %s\n', section{ii})
+                            err = -1;
                         end
                     end
                 end
@@ -1124,6 +1273,7 @@ classdef ProcStreamClass < handle
         function CreateDefault(obj)
             obj.fcallStrEncodedGroup('init');
             obj.fcallStrEncodedSubj('init');
+            obj.fcallStrEncodedSess('init');
             obj.fcallStrEncodedRun('init');
         end
         
@@ -1134,8 +1284,10 @@ classdef ProcStreamClass < handle
             switch(lower(type))
                 case {'group', 'groupclass'}
                     obj2.Decode(obj.fcallStrEncodedGroup);
-                case {'subj', 'session', 'subjclass'}
+                case {'subj', 'subjclass'}
                     obj2.Decode(obj.fcallStrEncodedSubj);
+                case {'sess', 'sessclass'}
+                    obj2.Decode(obj.fcallStrEncodedSess);
                 case {'run', 'runclass'}
                     obj2.Decode(obj.fcallStrEncodedRun);
                 otherwise
@@ -1153,8 +1305,9 @@ classdef ProcStreamClass < handle
 
         % ----------------------------------------------------------------------------------
         function suffix = getDefaultProcStream()
+            global cfg             
             suffix = '';
-            defaultProcStream = ConfigFileClass().GetValue('Default Processing Stream Style');
+            defaultProcStream = cfg.GetValue('Default Processing Stream Style');
             if includes(lower(defaultProcStream),'nirs')
                 suffix = '_Nirs';
             end
@@ -1205,8 +1358,34 @@ classdef ProcStreamClass < handle
                 iS = obj.reg.isubj;
                 suffix = obj.getDefaultProcStream();
                 tmp = {...
-                    obj.reg.funcReg(iS).GetUsageStrDecorated(['hmrS_RunAvg',suffix],'dcAvg'); ...
-                    obj.reg.funcReg(iS).GetUsageStrDecorated(['hmrS_RunAvgStd2',suffix],'dcAvg'); ...
+                    obj.reg.funcReg(iS).GetUsageStrDecorated(['hmrS_SessAvg',suffix],'dcAvg'); ...
+                    obj.reg.funcReg(iS).GetUsageStrDecorated(['hmrS_SessAvgStd2',suffix],'dcAvg'); ...
+                };
+                k=[]; kk=1;
+                for ii=1:length(tmp)
+                    if isempty(tmp{ii})
+                        k(kk)=ii;
+                        kk=kk+1;
+                    end
+                end
+                tmp(k) = [];
+                if ~isempty(tmp)
+                    v = tmp;
+                end
+            end
+            val = v;
+        end
+
+        
+        % ----------------------------------------------------------------------------------
+        function val = fcallStrEncodedSess(obj, init)
+            persistent v;
+            if exist('init','var') && strcmp(init,'init') && ~obj.reg.IsEmpty
+                iS = obj.reg.isess;
+                suffix = obj.getDefaultProcStream();
+                tmp = {...
+                    obj.reg.funcReg(iS).GetUsageStrDecorated(['hmrE_RunAvg',suffix],'dcAvg'); ...
+                    obj.reg.funcReg(iS).GetUsageStrDecorated(['hmrE_RunAvgStd2',suffix],'dcAvg'); ...
                 };
                 k=[]; kk=1;
                 for ii=1:length(tmp)
@@ -1288,6 +1467,183 @@ classdef ProcStreamClass < handle
         end
         
         
+        
+        % ---------------------------------------------------------
+        function ml = GetMeasurementList(obj, matrixMode, iBlk, dataType)
+            %  
+            %  Syntax: 
+            %     ml = GetMeasurementList(obj, matrixMode, iBlks, dataType)
+            %
+            %  Description:
+            %     To specify the type of data associated with the measurement list use the last argument,
+            %     dataType:
+            %
+            %        Optical Density     :  'od'
+            %        Concentration       :  'conc' | 'hb' | 'hbo' | 'hbr' | 'hbt'
+            %        HRF Optical Density :  'od hrf' | 'od_hrf' | 'hrf od' | 'hrf_od'
+            %        HRF Concentration   :  'hb hrf' | 'conc hrf' | 'hb_hrf' | 'conc_hrf' | 'hrf hb' | 'hrf conc' | 'hrf_hb' | 'hrf_conc'
+            %
+            ml = [];
+            if ~exist('matrixMode','var')
+                matrixMode = '';
+            end
+            if ~exist('iBlk','var') || isempty(iBlk)
+                iBlk = 1;
+            end
+            if ~exist('dataType','var')
+                dataType = obj.datatypes.CONCENTRATION{1};
+            end
+            switch(lower(dataType))
+                case obj.datatypes.OPTICAL_DENSITY
+                    if iBlk <= length(obj.output.dod)
+                        ml = obj.output.dod(iBlk).GetMeasurementList(matrixMode);
+                    end
+                case obj.datatypes.CONCENTRATION
+                    if iBlk <= length(obj.output.dc)
+                        ml = obj.output.dc(iBlk).GetMeasurementList(matrixMode);
+                    end
+                case [obj.datatypes.HRF_OPTICAL_DENSITY, obj.datatypes.HRF_OPTICAL_DENSITY_STD]
+                    if iBlk <= length(obj.output.dodAvg)
+                        ml = obj.output.dodAvg(iBlk).GetMeasurementList(matrixMode);
+                    end
+                case [obj.datatypes.HRF_CONCENTRATION, obj.datatypes.HRF_CONCENTRATION_STD]
+                    if iBlk <= length(obj.output.dcAvg)
+                        ml = obj.output.dcAvg(iBlk).GetMeasurementList(matrixMode);
+                    end
+            end
+        end        
+
+
+
+        % ---------------------------------------------------------
+        function t = GetTHRF(obj, iBlk)
+            t = [];
+            if ~exist('iBlk','var') || isempty(iBlk)
+                iBlk = 1;
+            end
+            t = obj.output.tHRF;
+        end
+        
+        
+        
+        % ---------------------------------------------------------
+        function [dataTimeSeries, time, measurementList] = GetDataTimeSeries(obj, options, iBlk)
+            %  
+            %  Syntax: 
+            %     dataTimeSeries = GetDataTimeSeries(obj, options, iBlk)
+            %
+            %  Description:
+            %     To specify the type of data use the argument options:
+            %
+            %        Optical Density     :  'od'
+            %        Concentration       :  'conc' | 'hb' | 'hbo' | 'hbr' | 'hbt'
+            %        HRF Optical Density :  'od hrf' | 'od_hrf'
+            %        HRF Concentration   :  'hb hrf' | 'conc hrf' | 'hb_hrf' | 'conc_hrf'
+            %
+            dataTimeSeries = [];
+            time = [];
+            measurementList = [];
+            if ~exist('options','var')
+                options = obj.datatypes.CONCENTRATION{1};
+            end
+            if ~exist('iBlk','var') || isempty(iBlk)
+                iBlk = 1;
+            end
+            switch(lower(options))
+                case obj.datatypes.OPTICAL_DENSITY
+                    if iBlk <= length(obj.output.dod)
+                        dataTimeSeries = obj.output.dod(iBlk).dataTimeSeries;
+                        time = obj.output.dod(iBlk).time;
+                        measurementList = obj.output.dod(iBlk).GetMeasurementList('matrix');
+                    end
+                case obj.datatypes.CONCENTRATION
+                    if iBlk <= length(obj.output.dc)
+                        dataTimeSeries = obj.output.dc(iBlk).dataTimeSeries;
+                        time = obj.output.dc(iBlk).time;
+                        measurementList = obj.output.dc(iBlk).GetMeasurementList('matrix');
+                    end
+                case obj.datatypes.HRF_OPTICAL_DENSITY
+                    if iBlk <= length(obj.output.dodAvg)
+                        dataTimeSeries = obj.output.dodAvg(iBlk).dataTimeSeries;
+                        time = obj.output.dodAvg(iBlk).time;
+                        measurementList = obj.output.dodAvg(iBlk).GetMeasurementList('matrix');
+                    end
+                case obj.datatypes.HRF_CONCENTRATION
+                    if iBlk <= length(obj.output.dcAvg)
+                        dataTimeSeries = obj.output.dcAvg(iBlk).dataTimeSeries;
+                        time = obj.output.dcAvg(iBlk).time;
+                        measurementList = obj.output.dcAvg(iBlk).GetMeasurementList('matrix');
+                    end
+                case obj.datatypes.HRF_CONCENTRATION_STD
+                    if iBlk <= length(obj.output.dodAvg)
+                        dataTimeSeries = obj.output.dodAvgStd(iBlk).dataTimeSeries;
+                        time = obj.output.dodAvgStd(iBlk).time;
+                        measurementList = obj.output.dodAvgStd(iBlk).GetMeasurementList('matrix');
+                    end
+                case obj.datatypes.HRF_OPTICAL_DENSITY_STD
+                    if iBlk <= length(obj.output.dcAvg)
+                        dataTimeSeries = obj.output.dcAvgStd(iBlk).dataTimeSeries;
+                        time = obj.output.dcAvgStd(iBlk).time;
+                        measurementList = obj.output.dcAvgStd(iBlk).GetMeasurementList('matrix');
+                    end
+            end
+        end
+        
+
+
+        % ---------------------------------------------------------
+        function [data, time, measurementList] = GetData(obj, options, iBlk)
+            data = [];
+            time = [];
+            measurementList = [];
+            if ~exist('options','var')
+                options = obj.datatypes.CONCENTRATION{1};
+            end
+            if ~exist('iBlk','var') || isempty(iBlk)
+                iBlk = 1;
+            end
+            switch(lower(options))
+                case obj.datatypes.OPTICAL_DENSITY
+                    if iBlk <= length(obj.output.dod)
+                        data = obj.output.dod(iBlk);
+                        time = obj.output.dod(iBlk).time;
+                        measurementList = obj.output.dod(iBlk).GetMeasurementList('matrix');
+                    end
+                case obj.datatypes.CONCENTRATION
+                    if iBlk <= length(obj.output.dc)
+                        data = obj.output.dc(iBlk);
+                        time = obj.output.dc(iBlk).time;
+                        measurementList = obj.output.dc(iBlk).GetMeasurementList('matrix');
+                    end
+                case obj.datatypes.HRF_OPTICAL_DENSITY
+                    if iBlk <= length(obj.output.dodAvg)
+                        data = obj.output.dodAvg(iBlk);
+                        time = obj.output.dodAvg(iBlk).time;
+                        measurementList = obj.output.dodAvg(iBlk).GetMeasurementList('matrix');
+                    end
+                case obj.datatypes.HRF_CONCENTRATION
+                    if iBlk <= length(obj.output.dcAvg)
+                        data = obj.output.dcAvg(iBlk);
+                        time = obj.output.dcAvg(iBlk).time;
+                        measurementList = obj.output.dcAvg(iBlk).GetMeasurementList('matrix');
+                    end
+                case obj.datatypes.HRF_CONCENTRATION_STD
+                    if iBlk <= length(obj.output.dodAvg)
+                        data = obj.output.dodAvgStd(iBlk);
+                        time = obj.output.dodAvgStd(iBlk).time;
+                        measurementList = obj.output.dodAvgStd(iBlk).GetMeasurementList('matrix');
+                    end
+                case obj.datatypes.HRF_OPTICAL_DENSITY_STD
+                    if iBlk <= length(obj.output.dcAvg)
+                        data = obj.output.dcAvgStd(iBlk);
+                        time = obj.output.dcAvgStd(iBlk).time;
+                        measurementList = obj.output.dcAvgStd(iBlk).GetMeasurementList('matrix');
+                    end
+            end
+        end
+        
+
+
         % ----------------------------------------------------------------------------------
         function SetTincMan(obj, val, iBlk)
             if ~exist('iBlk','var')
@@ -1339,15 +1695,6 @@ classdef ProcStreamClass < handle
                 iBlk = [];
             end
             mlActAuto = obj.output.GetVar('mlActAuto',iBlk);
-        end
-
-        
-        % ----------------------------------------------------------------------------------
-        function mlVis = GetMeasListVis(obj, iBlk)
-            if ~exist('iBlk','var')
-                iBlk = [];
-            end
-            mlVis = obj.input.GetVar('mlVis',iBlk);
         end
 
         
@@ -1450,6 +1797,12 @@ classdef ProcStreamClass < handle
             obj.input.RenameStimColumn(oldname, newname);
         end
         
+        % ----------------------------------------------------------------------------------
+        function stim = GetStim(obj)
+            stim = obj.input.GetStim();
+        end
+        
+    
         % ----------------------------------------------------------------------------------
         function data = GetStimData(obj, icond)
             data = obj.input.GetStimData(icond);
@@ -1570,6 +1923,29 @@ classdef ProcStreamClass < handle
             obj.input.RenameCondition(oldname, newname);
         end
         
+
+        
+        % ---------------------------------------------------------------
+        function InitDataTypes(obj)
+            obj.datatypes = struct(...
+                'RAW',{{'raw','raw data','intensity'}}, ...
+                'OPTICAL_DENSITY',{{'od'}}, ...
+                'CONCENTRATION',{{'conc','hb','hbo','hbr','hbt'}}, ...
+                'HRF_CONCENTRATION',{{'hrf conc','hrf_conc','hb hrf','conc hrf','hb_hrf','conc_hrf'}}, ...
+                'HRF_OPTICAL_DENSITY',{{'hrf od','hrf_od','od hrf','od_hrf'}}, ...
+                'HRF_CONCENTRATION_STD',{{'hrf conc std','hrf_conc_std','hb hrf std','conc hrf std','hb_hrf_std','conc_hrf_std'}}, ...
+                'HRF_OPTICAL_DENSITY_STD',{{'hrf od std','hrf_od_std','od hrf std','od_hrf_std'}} ...
+                );
+        end
+            
+        
+        
+        % ---------------------------------------------------------------
+        function datatypes = GetDataTypes(obj)
+            datatypes = obj.datatypes;           
+        end
+            
+        
     end
 
     
@@ -1578,6 +1954,18 @@ classdef ProcStreamClass < handle
     %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     methods        
         
+        % ----------------------------------------------------------------------------------
+        function tblcells = GenerateTableCells_MeanHRF_Alt(obj, name, CondNames, trange, width, iBlk)
+            if nargin<4
+                width = 12;
+            end
+            if nargin<5
+                iBlk = 1;
+            end
+            tblcells = obj.output.GenerateTableCells_MeanHRF_Alt(name, CondNames, trange, width, iBlk);
+        end
+
+            
         % ----------------------------------------------------------------------------------
         function [tblcells, maxwidth] = GenerateTableCellsHeader_MeanHRF(obj, iBlk)
             if nargin<2
@@ -1616,8 +2004,29 @@ classdef ProcStreamClass < handle
             obj.output.ExportHRF(filename, CondNames, iBlk);
         end
         
+        
+        % ----------------------------------------------------------------------------------
+        function filename = ExportHRF_GetFilename(obj, filename)
+            filename = obj.output.ExportHRF_GetFilename(filename);
+        end
+        
+        
+        % ----------------------------------------------------------------------------------
+        function ExportMeanHRF(obj, filename, CondNames, trange, iBlk)
+            if ~exist('iBlk','var') || isempty(iBlk)
+                iBlk = 1;
+            end
+            obj.output.ExportMeanHRF(filename, CondNames, trange, iBlk);
+        end
+        
+        
+        % ----------------------------------------------------------------------------------
+        function ExportMeanHRF_Alt(obj, filename, tblcells)
+            obj.output.ExportMeanHRF_Alt(filename, tblcells);
+        end
+        
     end
-    
+        
 end
 
 
